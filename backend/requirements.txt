@@ -1,0 +1,21 @@
+# AI 宠物「球球」语音管道后端依赖
+# 用虚拟环境安装，避免污染系统 Python：
+#   cd backend
+#   python -m venv .venv
+#   .venv\Scripts\activate
+#   pip install -r requirements.txt
+#
+# 说明：ASR 用阿里云 Qwen3-ASR-Flash-Realtime（云端流式识别）
+#       LLM 用 openai SDK（兼容 DeepSeek）
+#       TTS 用阿里云 Qwen3-TTS-Flash-Realtime（流式合成）
+
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.6
+websockets>=12.0
+openai>=1.40.0
+webrtcvad-wheels>=2.0.11
+numpy
+python-dotenv>=1.0.1
+httpx>=0.27.0
+dashscope>=1.20.0
+websocket-client>=1.8.0

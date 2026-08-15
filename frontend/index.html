@@ -1,0 +1,836 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>球球语音管道测试</title>
+<style>
+  :root { color-scheme: light; }
+  body {
+    font-family: "Microsoft YaHei", sans-serif;
+    background: #faf6f0;
+    color: #333;
+    display: flex;
+    flex-direction: row;
+    align-items: flex-start;
+    padding: 24px;
+    min-height: 100vh;
+    margin: 0;
+    gap: 20px;
+  }
+  /* 左栏：主交互区 */
+  #left-panel {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  /* 右栏：事件流看板（固定宽度） */
+  #right-panel {
+    width: 420px;
+    flex-shrink: 0;
+    position: sticky;
+    top: 24px;
+    display: flex;
+    flex-direction: column;
+  }
+  h1 { color: #e8843c; font-size: 28px; margin-bottom: 8px; }
+  .subtitle { color: #888; font-size: 14px; margin-bottom: 30px; }
+  #status {
+    background: #fff;
+    border: 2px solid #eee;
+    border-radius: 16px;
+    padding: 20px 32px;
+    font-size: 20px;
+    margin-bottom: 24px;
+    min-width: 280px;
+    text-align: center;
+    transition: all 0.3s;
+  }
+  #status.listening { border-color: #7ec87e; background: #f0faf0; }
+  #status.speaking { border-color: #e8b43c; background: #fffaf0; }
+  #status.thinking { border-color: #8ab8e8; background: #f0f6ff; }
+  #btn {
+    background: #e8843c;
+    color: #fff;
+    border: none;
+    border-radius: 40px;
+    padding: 14px 40px;
+    font-size: 18px;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+  #btn:hover { background: #d6752f; }
+  #btn:disabled { background: #ccc; cursor: not-allowed; }
+  #log {
+    margin-top: 30px;
+    width: 100%;
+    max-width: 560px;
+    background: #fff;
+    border-radius: 12px;
+    padding: 16px;
+    min-height: 120px;
+    font-size: 14px;
+    color: #555;
+    white-space: pre-wrap;
+    border: 1px solid #eee;
+  }
+  .log-user { color: #2b6cb0; }
+  .log-ball { color: #e8843c; }
+  .log-sys { color: #999; }
+
+  #timing {
+    margin-top: 20px;
+    width: 100%;
+    max-width: 560px;
+    background: #1e1e2e;
+    border-radius: 12px;
+    padding: 16px;
+    color: #cdd6f4;
+    font-family: Consolas, monospace;
+    font-size: 13px;
+  }
+  #timing .bar-row {
+    display: flex;
+    align-items: center;
+    margin-bottom: 8px;
+  }
+  #timing .bar-label {
+    width: 60px;
+    flex-shrink: 0;
+    color: #a6adc8;
+  }
+  #timing .bar-track {
+    flex: 1;
+    height: 14px;
+    background: #313244;
+    border-radius: 7px;
+    overflow: hidden;
+  }
+  #timing .bar-fill {
+    height: 100%;
+    border-radius: 7px;
+    transition: width 0.3s;
+  }
+  #timing .bar-value {
+    width: 70px;
+    text-align: right;
+    flex-shrink: 0;
+    color: #f5c2e7;
+  }
+  .fill-asr { background: #89b4fa; }
+  .fill-llm { background: #a6e3a1; }
+  .fill-tts { background: #f9e2af; }
+
+  /* 事件流看板（右栏） */
+  #event-panel {
+    background: #1e1e2e;
+    border-radius: 12px;
+    padding: 16px;
+    color: #cdd6f4;
+    font-family: Consolas, monospace;
+    font-size: 13px;
+    display: flex;
+    flex-direction: column;
+    height: calc(100vh - 48px);
+    min-height: 400px;
+  }
+  /* 事件流滚动区（可鼠标滚动） */
+  #event-list {
+    flex: 1;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 12px;
+    padding-right: 4px;
+  }
+  #event-list::-webkit-scrollbar { width: 8px; }
+  #event-list::-webkit-scrollbar-thumb { background: #45475a; border-radius: 4px; }
+  .event-row {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    background: #313244;
+    animation: eventIn 0.3s ease;
+  }
+  .event-round {
+    color: #6c7086;
+    flex-shrink: 0;
+    font-size: 11px;
+    min-width: 34px;
+  }
+  .event-ts {
+    color: #a6adc8;
+    flex-shrink: 0;
+    font-size: 11px;
+    min-width: 44px;
+  }
+  .event-stage {
+    flex-shrink: 0;
+    font-weight: bold;
+    min-width: 70px;
+  }
+  .event-detail {
+    flex: 1;
+    color: #cdd6f4;
+    word-break: break-all;
+  }
+  .event-dur {
+    flex-shrink: 0;
+    color: #f5c2e7;
+    font-size: 11px;
+  }
+  .stage-VAD { color: #89b4fa; }
+  .stage-ASR { color: #89dceb; }
+  .stage-LLM { color: #a6e3a1; }
+  .stage-TTS { color: #f9e2af; }
+  .stage-Barge { color: #f38ba8; }
+
+  @keyframes eventIn {
+    from { opacity: 0; transform: translateY(-4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  /* 底部平均面板（固定，不随事件流滚动） */
+  #avg-panel {
+    flex-shrink: 0;
+    padding-top: 12px;
+    border-top: 1px solid #45475a;
+  }
+  #avg-bars {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  #avg-bars .bar-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  #avg-bars .bar-label {
+    width: 70px;
+    flex-shrink: 0;
+    color: #a6adc8;
+    font-size: 12px;
+  }
+  #avg-bars .bar-track {
+    flex: 1;
+    height: 10px;
+    background: #313244;
+    border-radius: 5px;
+    overflow: hidden;
+  }
+  #avg-bars .bar-fill {
+    height: 100%;
+    border-radius: 5px;
+    transition: width 0.3s;
+  }
+  #avg-bars .bar-value {
+    width: 56px;
+    text-align: right;
+    flex-shrink: 0;
+    color: #f5c2e7;
+    font-size: 12px;
+  }
+</style>
+</head>
+<body>
+  <!-- 左栏：主交互区 -->
+  <div id="left-panel">
+    <h1>球球 🐱</h1>
+    <div class="subtitle">语音管道测试：AEC → VAD → ASR → LLM → TTS</div>
+
+    <div id="status">未连接</div>
+    <button id="btn" onclick="toggle()">开始对话</button>
+
+    <div id="log"></div>
+  </div>
+
+  <!-- 右栏：事件流看板 -->
+  <div id="right-panel">
+    <div id="event-panel">
+      <div style="margin-bottom:10px;color:#f5c2e7;">📊 事件流</div>
+      <div id="event-list"></div>
+      <!-- 底部固定的平均指标 -->
+      <div id="avg-panel">
+        <div style="margin-bottom:6px;color:#89dceb;">平均指标（<span id="avg-count">0</span> 轮）</div>
+        <!-- 打断延迟（独立指标，静态占位，JS 更新数值） -->
+        <div id="barge-avg-row" style="display:flex;align-items:center;gap:8px;margin:6px 0;">
+          <span style="color:#f38ba8;font-size:12px;width:70px;flex-shrink:0;font-weight:bold;">打断延迟</span>
+          <div style="flex:1;height:10px;background:#313244;border-radius:5px;overflow:hidden;">
+            <div id="barge-avg-fill" style="height:100%;width:0%;background:#f38ba8;border-radius:5px;"></div>
+          </div>
+          <span id="barge-avg-value" style="width:56px;text-align:right;color:#f38ba8;font-size:12px;font-weight:bold;">-</span>
+        </div>
+        <div id="avg-bars"></div>
+      </div>
+    </div>
+  </div>
+
+<!-- 本地加载 onnxruntime-web 和 vad-web（UMD 全局版本，不依赖 esm.sh） -->
+<script src="./vad/ort.min.js"></script>
+<script src="./vad/bundle.min.js"></script>
+<script>
+// vad-web 挂到 window.vad（bundle.min.js 里 e.vad = ...）
+// onnxruntime-web 挂到 window.ort（bundle.min.js 里 e.ort = ...）
+
+let ws = null;
+let audioCtx = null;
+let stream = null;
+let source = null;
+let processor = null;
+let isRunning = false;
+let frontendVad = null;  // 前端 Silero VAD 实例
+
+// ── 打断检测状态 ──────────────────────────────
+let ballIsPlaying = false;      // 球球是否正在播放
+let bargeStartTime = null;      // VAD 检测到人声开始的时间（= 用户开口近似时刻）
+let bargeArmed = false;         // 是否已触发打断（防止重复触发）
+let pendingPlaybackDone = false; // 是否已收到 reply_end、等待音频真正播完
+
+// ── 麦克风环形缓存（pre-roll ring buffer）──────────
+// 持续保留最近 2 秒的 PCM 音频，打断时回退取「开口前」的预卷，防丢第一个字
+const PRE_ROLL_BUFFER_SECONDS = 2;   // 环形缓存总长（秒）
+const PRE_ROLL_MS = 256;             // 回退量（毫秒），从VAD触发点往前取这么多
+const PCM_BYTES_PER_SEC = 16000 * 2; // 16kHz 16bit 单声道 = 32000字节/秒
+const PRE_ROLL_BUFFER_BYTES = PRE_ROLL_BUFFER_SECONDS * PCM_BYTES_PER_SEC; // 64000字节
+let preRollBuffer = [];  // 存 {data: Uint8Array, timestamp: number} 的环形队列
+const PRE_ROLL_MS_BYTES = (PRE_ROLL_MS / 1000) * PCM_BYTES_PER_SEC; // 回退字节数
+
+const statusEl = document.getElementById('status');
+const btnEl = document.getElementById('btn');
+const logEl = document.getElementById('log');
+
+function setStatus(text, cls) {
+  statusEl.textContent = text;
+  statusEl.className = cls || '';
+}
+
+function log(text, cls) {
+  const div = document.createElement('div');
+  div.className = cls || '';
+  div.textContent = text;
+  logEl.appendChild(div);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function appendToLastBallMsg(text) {
+  // 找到日志区最后一条球球消息，追加文本
+  const children = logEl.children;
+  for (let i = children.length - 1; i >= 0; i--) {
+    if (children[i].classList.contains('log-ball')) {
+      children[i].textContent += text;
+      break;
+    }
+  }
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+async function toggle() {
+  if (isRunning) { await stop(); } else { await start(); }
+}
+
+// ESM 模块作用域，函数不会挂到 window，但 onclick 属性访问的是全局
+// 显式挂到 window，让 HTML 的 onclick="toggle()" 能找到
+window.toggle = toggle;
+
+async function start() {
+  try {
+    // 1. 连接后端 WebSocket
+    ws = new WebSocket('ws://127.0.0.1:8001/ws/audio');
+    ws.binaryType = 'arraybuffer';
+    ws.onmessage = onMessage;
+    ws.onclose = () => {
+      if (isRunning) {
+        setStatus('连接断开', '');
+        // 只清理，不再调用 stop() 避免二次关闭
+        isRunning = false;
+        btnEl.textContent = '开始对话';
+        if (processor) { processor.disconnect(); }
+        if (stream) { stream.getTracks().forEach(t => t.stop()); }
+        log('连接断开', 'log-sys');
+      }
+    };
+    await new Promise(res => ws.onopen = res);
+    log('已连接后端', 'log-sys');
+
+    // 2. 获取麦克风（关键：echoCancellation 开启 AEC）
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,      // 回声消除
+        noiseSuppression: true,       // 降噪
+        autoGainControl: true,        // 自动增益
+        channelCount: 1,
+        sampleRate: 16000,
+      }
+    });
+
+    // 2.5 初始化前端 Silero VAD（人声检测，用于打断）
+    await initFrontendVad();
+
+    // 3. 采集音频并发送
+    // buffer 大小关键：4096 采样点 = 256ms 缓冲，太大会导致打断延迟
+    // 改成 1024 采样点 = 64ms，音频更快到达后端，打断响应更快
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+    source = audioCtx.createMediaStreamSource(stream);
+    processor = audioCtx.createScriptProcessor(1024, 1, 1);
+
+    processor.onaudioprocess = (e) => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      const input = e.inputBuffer.getChannelData(0);
+      // 转 16bit PCM
+      const pcm = new Int16Array(input.length);
+      for (let i = 0; i < input.length; i++) {
+        pcm[i] = Math.max(-1, Math.min(1, input[i])) * 32767;
+      }
+      const pcmBytes = new Uint8Array(pcm.buffer);
+
+      // 写入环形缓存（持续保留最近2秒）
+      preRollBuffer.push({ data: pcmBytes, timestamp: performance.now() });
+      // 砍掉超出2秒的部分
+      let totalBytes = 0;
+      for (const b of preRollBuffer) totalBytes += b.data.length;
+      while (totalBytes > PRE_ROLL_BUFFER_BYTES && preRollBuffer.length > 0) {
+        const removed = preRollBuffer.shift();
+        totalBytes -= removed.data.length;
+      }
+
+      // 前端打断检测由 Silero VAD 的 onSpeechStart 回调触发（见 initFrontendVad）
+      // 这里不再做能量判断，直接发送音频（打断时也不停发，保证不丢字）
+      ws.send(pcm.buffer);
+    };
+    source.connect(processor);
+    processor.connect(audioCtx.destination);
+
+    isRunning = true;
+    btnEl.textContent = '停止';
+    setStatus('我在听，说吧…', 'listening');
+    log('开始录音（AEC 已开启）', 'log-sys');
+  } catch (err) {
+    log('错误：' + err.message, 'log-sys');
+    console.error(err);
+  }
+}
+
+async function stop() {
+  isRunning = false;
+  btnEl.textContent = '开始对话';
+  setStatus('已停止', '');
+  if (frontendVad) { try { frontendVad.destroy(); } catch (e) {} frontendVad = null; }
+  if (processor) { processor.disconnect(); source.disconnect(); }
+  if (stream) { stream.getTracks().forEach(t => t.stop()); }
+  if (ws) { ws.close(); }
+  log('已停止', 'log-sys');
+}
+
+function onMessage(event) {
+  if (typeof event.data === 'string') {
+    const msg = JSON.parse(event.data);
+    switch (msg.type) {
+      case 'user_text':
+        log('你：' + msg.text, 'log-user');
+        break;
+      case 'reply_start':
+        // 后端开始生成回复，标记球球进入「即将/正在说话」状态
+        ballIsPlaying = true;
+        bargeArmed = false;
+        bargeStartTime = null;
+        break;
+      case 'reply_end':
+        // 后端整段回复发完。但音频块可能还在播放队列里。
+        // 不立即设 ballIsPlaying=false，而是等所有音频块真正播完
+        // （见 feedPcm 里 source.onended），那时才发 client_playback_done 给后端
+        pendingPlaybackDone = true;
+        break;
+      case 'reply':
+        setStatus('球球在说话…', 'speaking');
+        log('球球[' + msg.emotion + ']：' + msg.text, 'log-ball');
+        break;
+      case 'reply_append':
+        // 后续句追加到上一条球球消息后面
+        appendToLastBallMsg(msg.text);
+        break;
+      case 'barge_in':
+        setStatus('打断了球球', 'listening');
+        log('⏹ 打断', 'log-sys');
+        stopStreamPlayback();
+        break;
+      case 'tts_start':
+        setStatus('球球在说话…', 'speaking');
+        startStreamPlayback();
+        break;
+      case 'tts_end':
+        setStatus('我在听，说吧…', 'listening');
+        break;
+      case 'event':
+        addEventRow(msg);
+        break;
+      case 'timing':
+        updateAvgPanel(msg);
+        // 不再在这里设 ballIsPlaying = false！
+        // 后端 timing 是「发送完」，但前端音频可能还在播放队列里。
+        // ballIsPlaying 应该由前端「实际播放完」决定（见 feedPcm 的 source.onended）
+        break;
+      case 'barge_avg':
+        updateBargeAvg(msg);
+        break;
+    }
+  } else {
+    // 二进制 PCM 音频块，边收边播
+    feedPcm(new Uint8Array(event.data));
+  }
+}
+
+// ── 事件流看板 ──────────────────────────────────────
+function addEventRow(msg) {
+  const list = document.getElementById('event-list');
+  const row = document.createElement('div');
+  row.className = 'event-row';
+
+  // 轮次
+  const round = document.createElement('span');
+  round.className = 'event-round';
+  round.textContent = '#' + msg.round;
+  row.appendChild(round);
+
+  // 时间戳（相对本轮开始）
+  const ts = document.createElement('span');
+  ts.className = 'event-ts';
+  ts.textContent = '+' + msg.ts + 's';
+  row.appendChild(ts);
+
+  // 阶段名
+  const stage = document.createElement('span');
+  stage.className = 'event-stage stage-' + msg.stage.replace(/[^A-Za-z]/g, '');
+  stage.textContent = msg.stage;
+  row.appendChild(stage);
+
+  // 详情
+  const detail = document.createElement('span');
+  detail.className = 'event-detail';
+  detail.textContent = msg.detail || '';
+  row.appendChild(detail);
+
+  // 耗时（毫秒显示）
+  if (msg.duration !== undefined && msg.duration !== null) {
+    const dur = document.createElement('span');
+    dur.className = 'event-dur';
+    dur.textContent = Math.round(msg.duration * 1000) + 'ms';
+    row.appendChild(dur);
+  }
+
+  list.appendChild(row);
+  // 自动滚到底部（事件流在 #event-list 内滚动，不是 #event-panel）
+  const listEl = document.getElementById('event-list');
+  listEl.scrollTop = listEl.scrollHeight;
+}
+
+// ── 底部平均指标面板 ────────────────────────────────
+function updateAvgPanel(msg) {
+  const count = msg.count || 0;
+  document.getElementById('avg-count').textContent = count;
+
+  const avg = msg.avg || {};
+  const max = 5; // 条形图刻度上限（秒）
+  const items = [
+    { key: 'e2e', label: '端到端', color: '#f38ba8', bold: true },
+    { key: 'asr', label: 'ASR', color: '#89b4fa' },
+    { key: 'llm_first_token', label: 'LLM首字', color: '#a6e3a1' },
+    { key: 'llm_first_sentence', label: 'LLM首句', color: '#a6e3a1' },
+    { key: 'tts_first_packet', label: 'TTS首包', color: '#f9e2af' },
+  ];
+
+  const container = document.getElementById('avg-bars');
+  container.innerHTML = '';
+  for (const it of items) {
+    const v = avg[it.key] || 0;
+    const vMs = v * 1000;  // 秒 → 毫秒
+    const row = document.createElement('div');
+    row.className = 'bar-row';
+
+    const label = document.createElement('span');
+    label.className = 'bar-label';
+    label.textContent = it.label;
+    if (it.bold) label.style.fontWeight = 'bold';
+    if (it.bold) label.style.color = '#f38ba8';
+    row.appendChild(label);
+
+    const track = document.createElement('div');
+    track.className = 'bar-track';
+    const fill = document.createElement('div');
+    fill.className = 'bar-fill';
+    fill.style.width = Math.min(100, (v / max) * 100) + '%';
+    fill.style.background = it.color;
+    track.appendChild(fill);
+    row.appendChild(track);
+
+    const value = document.createElement('span');
+    value.className = 'bar-value';
+    value.textContent = vMs.toFixed(0) + 'ms';
+    if (it.bold) value.style.fontWeight = 'bold';
+    if (it.bold) value.style.color = '#f38ba8';
+    row.appendChild(value);
+
+    container.appendChild(row);
+  }
+}
+
+// ── 打断延迟平均（单独指标，独立更新）──────────────
+let bargeAvgValue = null;  // 缓存打断平均延迟
+let bargeAvgCount = 0;
+
+function updateBargeAvg(msg) {
+  bargeAvgValue = msg.avg;
+  bargeAvgCount = msg.count;
+  renderBargeAvg();
+}
+
+function renderBargeAvg() {
+  // 只更新静态元素的数值，不再动态插入 DOM
+  const fillEl = document.getElementById('barge-avg-fill');
+  const valueEl = document.getElementById('barge-avg-value');
+  if (!fillEl || !valueEl) return;
+  if (bargeAvgValue !== null) {
+    const vMs = bargeAvgValue * 1000;  // 秒 → 毫秒
+    fillEl.style.width = Math.min(100, (bargeAvgValue / 5) * 100) + '%';
+    valueEl.textContent = vMs.toFixed(0) + 'ms';
+  } else {
+    fillEl.style.width = '0%';
+    valueEl.textContent = '-';
+  }
+}
+
+// 页面加载后立即渲染一次（脚本在 body 末尾，DOM 已就绪，直接调用）
+renderBargeAvg();
+
+// ── 流式 PCM 播放器（时间线调度版）──────────────────
+let pcmPlayback = null;
+
+function startStreamPlayback() {
+  // 如果已有播放器在播，说明是「后续句」，直接复用，不重置（避免掐断上一句）
+  if (pcmPlayback) {
+    return;
+  }
+  pcmPlayback = {
+    ctx: new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 }),
+    nextStartTime: 0,   // 下一块音频的起始播放时间（时间线上连续接续）
+    initialized: false,
+    gainNode: null,     // 音量控制节点（打断时快速静音）
+    activeSources: [],  // 已排队的音频源，打断时统一停止
+  };
+  // 加一个 gain 节点，打断时通过 gain=0 快速静音
+  pcmPlayback.gainNode = pcmPlayback.ctx.createGain();
+  pcmPlayback.gainNode.connect(pcmPlayback.ctx.destination);
+  // 标记球球开始播放，启用前端打断检测
+  ballIsPlaying = true;
+  bargeArmed = false;   // 新一轮播放，重新武装打断
+  bargeStartTime = null;
+}
+
+function feedPcm(pcm) {
+  if (!pcmPlayback) return;
+  const samples = new Int16Array(pcm.buffer, pcm.byteOffset, pcm.byteLength / 2);
+  const floatBuf = new Float32Array(samples.length);
+  for (let i = 0; i < samples.length; i++) {
+    floatBuf[i] = samples[i] / 32768.0;
+  }
+
+  const ctx = pcmPlayback.ctx;
+  const buffer = ctx.createBuffer(1, floatBuf.length, ctx.sampleRate);
+  buffer.getChannelData(0).set(floatBuf);
+
+  const source = ctx.createBufferSource();
+  source.buffer = buffer;
+  source.connect(pcmPlayback.gainNode);  // 连到 gain 节点，而非直接 destination
+
+  // 关键：用「时间线」接续播放，而不是各自独立 start
+  let startAt;
+  if (!pcmPlayback.initialized) {
+    startAt = ctx.currentTime + 0.02;  // 首块稍等 20ms 缓冲
+    pcmPlayback.initialized = true;
+  } else {
+    // 接续上一块，但如果上一块已经播完（nextStartTime 是过去），
+    // 就从「当前时间 + 小缓冲」开始，避免追着过去的时间播导致重叠/丢音
+    startAt = Math.max(pcmPlayback.nextStartTime, ctx.currentTime + 0.02);
+  }
+
+  // 计算这一块的时长，作为下一块的起始时间
+  const duration = floatBuf.length / ctx.sampleRate;
+  pcmPlayback.nextStartTime = startAt + duration;
+
+  source.start(startAt);
+  // 记录 active 的 source，打断时统一 stop
+  pcmPlayback.activeSources.push(source);
+  // source 播完后自动从列表移除
+  source.onended = () => {
+    const idx = pcmPlayback.activeSources.indexOf(source);
+    if (idx >= 0) pcmPlayback.activeSources.splice(idx, 1);
+    // 所有音频块播完 + 已收到 reply_end → 前端真正播放结束
+    // 此时发 client_playback_done 给后端，后端才进入 listening + 保护期
+    if (pcmPlayback && pcmPlayback.activeSources.length === 0 && pendingPlaybackDone) {
+      pendingPlaybackDone = false;
+      ballIsPlaying = false;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'client_playback_done' }));
+      }
+    }
+  };
+}
+
+function stopStreamPlayback() {
+  if (pcmPlayback) {
+    // 打断时：1. 立即静音（gain 瞬间归零，消除残音）
+    try {
+      if (pcmPlayback.gainNode) {
+        pcmPlayback.gainNode.gain.setValueAtTime(0, pcmPlayback.ctx.currentTime);
+      }
+    } catch (e) {}
+    // 2. 停止所有已排队的 source
+    for (const s of pcmPlayback.activeSources) {
+      try { s.stop(); } catch (e) {}
+    }
+    pcmPlayback.activeSources = [];
+    // 3. 关闭音频上下文
+    try { pcmPlayback.ctx.close(); } catch (e) {}
+    pcmPlayback = null;
+  }
+  // 标记球球停止播放，关闭前端打断检测
+  ballIsPlaying = false;
+}
+
+// ── 前端 Silero VAD 初始化（人声检测）────────────
+async function initFrontendVad() {
+  try {
+    const base = location.href.replace(/\/[^\/]*$/, '/');
+    // 配置 onnxruntime-web 的 WASM 路径（本地文件）
+    if (window.ort && window.ort.env) {
+      window.ort.env.wasm.wasmPaths = base + 'vad/';
+    }
+    // 用全局 window.vad.MicVAD（bundle.min.js 挂的 UMD 全局对象）
+    const vadLib = window.vad;
+    frontendVad = await vadLib.MicVAD.new({
+      modelURL: base + 'vad/silero_vad.onnx',
+      workletURL: base + 'vad/vad.worklet.bundle.min.js',
+      stream: stream,  // 复用已获取的麦克风流（已开 AEC）
+      // 人声检测回调
+      onSpeechStart: () => {
+        console.log('[VAD] onSpeechStart, ballIsPlaying=' + ballIsPlaying + ', bargeArmed=' + bargeArmed);
+        // 球球正在播放时，检测到人声 = 用户插话 → 打断
+        if (ballIsPlaying && !bargeArmed) {
+          bargeArmed = true;
+          bargeStartTime = performance.now();
+          localBargeIn();
+        }
+      },
+      onSpeechEnd: () => {
+        // 用户说完，重置打断臂（允许下一次打断）
+        bargeArmed = false;
+        bargeStartTime = null;
+      },
+      onVADMisfire: () => {
+        // Silero 误报（短促噪声），重置
+        bargeArmed = false;
+        bargeStartTime = null;
+      },
+      positiveSpeechThreshold: 0.5,
+      negativeSpeechThreshold: 0.35,
+      minSpeechFrames: 3,
+      redemptionFrames: 8,
+      preSpeechPadFrames: 1,
+    });
+    frontendVad.start();
+    log('前端 Silero VAD 已就绪', 'log-sys');
+  } catch (err) {
+    console.error('VAD 初始化失败:', err);
+    log('VAD 初始化失败，打断退化为能量检测', 'log-sys');
+    frontendVad = null;
+  }
+}
+
+// ── 前端本地打断（用户插话时调用）──────────────
+function localBargeIn() {
+  // 1. 计算真实打断响应延迟 = 你开口（VAD检测到人声）→ 现在（静音）
+  let bargeLatency = null;
+  if (bargeStartTime !== null) {
+    bargeLatency = (performance.now() - bargeStartTime) / 1000;  // 转秒
+  }
+
+  // 2. 从环形缓存切出「回退256ms」的预卷音频（你开口前的那段，防止丢第一个字）
+  const preRoll = slicePreRoll();
+
+  // 3. 立即本地静音（零网络延迟）
+  stopStreamPlayback();
+
+  // 4. 通知后端「打断了」，带上预卷音频和打断延迟
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({
+      type: 'client_barge_in',
+      latency: bargeLatency !== null ? parseFloat(bargeLatency.toFixed(3)) : null,
+      preRollBase64: preRoll ? arrayBufferToBase64(preRoll.buffer) : null,
+    }));
+  }
+
+  // 5. 更新 UI 状态
+  setStatus('打断了球球', 'listening');
+  log('⏹ 打断（VAD检测，响应 ' + (bargeLatency !== null ? (bargeLatency * 1000).toFixed(0) + 'ms' : '?') + '）', 'log-sys');
+
+  // 6. 重置打断检测状态
+  bargeStartTime = null;
+  // 立即重置 bargeArmed，不依赖 onSpeechEnd（避免卡死在 true 导致后续打断失效）
+  // 等下一轮球球开始播放时会重新武装
+  bargeArmed = false;
+}
+
+// ── 从环形缓存切出「回退 PRE_ROLL_MS 毫秒」的预卷音频 ──
+function slicePreRoll() {
+  if (preRollBuffer.length === 0) return null;
+  // 从最新的块往前累计，凑够 PRE_ROLL_MS_BYTES 字节
+  const chunks = [];
+  let collected = 0;
+  for (let i = preRollBuffer.length - 1; i >= 0; i--) {
+    chunks.unshift(preRollBuffer[i].data);
+    collected += preRollBuffer[i].data.length;
+    if (collected >= PRE_ROLL_MS_BYTES) break;
+  }
+  // 合并成一段连续的 Uint8Array
+  const merged = new Uint8Array(collected);
+  let offset = 0;
+  for (const c of chunks) {
+    merged.set(c, offset);
+    offset += c.length;
+  }
+  return merged;
+}
+
+// ── ArrayBuffer → base64（用于通过 JSON 传输二进制音频）──
+function arrayBufferToBase64(buffer) {
+  let binary = '';
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
+// 播放缓存的 MP3 音频（已废弃，改用流式 PCM 播放，保留兼容）
+async function playAudio(chunks) {
+  if (!chunks.length) return;
+  const mp3 = new Blob(chunks, { type: 'audio/mpeg' });
+  const url = URL.createObjectURL(mp3);
+  const audio = new Audio(url);
+  audio.onended = () => URL.revokeObjectURL(url);
+  try {
+    await audio.play();
+  } catch (err) {
+    console.error('播放失败:', err);
+    log('播放失败：' + err.message, 'log-sys');
+  }
+}
+</script>
+</body>
+</html>
