@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
 from personality import PERSONA_PROMPT
+from voice_style import VOICE_GUIDE
 
 load_dotenv()  # 读取 backend/.env
 
@@ -49,7 +50,9 @@ class ChatEngine:
         """
         import time
 
-        messages = [{"role": "system", "content": PERSONA_PROMPT}]
+        # system prompt = 人格 + 语气输出要求
+        system_prompt = PERSONA_PROMPT + "\n" + VOICE_GUIDE
+        messages = [{"role": "system", "content": system_prompt}]
         for msg in history[-20:]:
             messages.append({"role": msg["role"], "content": msg["content"]})
         messages.append({"role": "user", "content": user_text})

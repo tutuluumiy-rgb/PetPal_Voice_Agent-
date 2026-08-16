@@ -15,25 +15,19 @@ from dotenv import load_dotenv
 import dashscope
 from dashscope.audio.qwen_tts_realtime import QwenTtsRealtime, QwenTtsRealtimeCallback, AudioFormat
 
+from voice_style import EMOTION_INSTRUCTIONS
+
 load_dotenv()
 
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY")
-TTS_MODEL = os.getenv("TTS_MODEL", "qwen3-tts-flash-realtime")
+# 改用 instruct 版本：支持自然语言指令控制情感/风格
+TTS_MODEL = os.getenv("TTS_MODEL", "qwen3-tts-instruct-flash-realtime")
+# 音色：Mochi（沙小弥）—— 聪明伶俐的小大人，童真未泯
+VOICE_ID = os.getenv("TTS_VOICE", "Mochi")
 
 # 显式设置 dashscope 的 api key
 if DASHSCOPE_API_KEY:
     dashscope.api_key = DASHSCOPE_API_KEY
-
-# 情绪 → 语气指令
-EMOTION_INSTRUCTIONS = {
-    "开心": "用开心雀跃的语气说",
-    "兴奋": "用激动兴奋的语气说",
-    "好奇": "用好奇疑惑的语气说",
-    "委屈": "用委屈巴巴、撒娇的语气说",
-    "难过": "用低落难过的语气说",
-    "困": "用慵懒犯困、慢悠悠的语气说",
-    "平静": "用平静温和的语气说",
-}
 
 
 class TTSEngine:
@@ -58,7 +52,10 @@ class TTSEngine:
         import base64
         import time
 
-        # 清空上次的取消标志，本轮重新开始
+        # 每句合成开始时清空取消标志（恢复首次提交的逻辑）
+        # 这样打断信号 cancel_event 是「当前句」级信号：
+        # 打断 → cancel_event=True → 当前句循环 break
+        # 下一句开始时 clear() → 但 handle_user_speech 的 abort_speaking 已阻止走到下一句
         self.cancel_event.clear()
 
         params = params or {}
@@ -116,7 +113,7 @@ class TTSEngine:
                 tts.connect()
                 # 配置会话：音色、格式、语气指令
                 tts.update_session(
-                    voice="Cherry",
+                    voice=VOICE_ID,
                     response_format=AudioFormat.PCM_24000HZ_MONO_16BIT,  # 24kHz PCM
                     instructions=instruction,
                 )

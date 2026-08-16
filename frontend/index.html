@@ -79,6 +79,8 @@
   .log-user { color: #2b6cb0; }
   .log-ball { color: #e8843c; }
   .log-sys { color: #999; }
+  .log-vad-front { color: #9b59b6; }  /* 前端VAD事件（紫色） */
+  .log-vad-back { color: #16a085; }   /* 后端VAD二次确认（青色） */
 
   #timing {
     margin-top: 20px;
@@ -286,13 +288,37 @@ let processor = null;
 let isRunning = false;
 let frontendVad = null;  // 前端 Silero VAD 实例
 
-// ── 打断检测状态 ──────────────────────────────
-let ballIsPlaying = false;      // 球球是否正在播放
-let bargeStartTime = null;      // VAD 检测到人声开始的时间（= 用户开口近似时刻）
-let bargeArmed = false;         // 是否已触发打断（防止重复触发）
-let pendingPlaybackDone = false; // 是否已收到 reply_end、等待音频真正播完
+// ══════════════════════════════════════════════════════════
+// 🎛 前端打断参数区（体感层）—— 集中调这里！
+// 双层打断架构：前端负责「体感」（快），后端负责「业务决策」（准）
+// 前端只上报事件，不参与最终是否打断的决策
+// ══════════════════════════════════════════════════════════
 
-// ── 麦克风环形缓存（pre-roll ring buffer）──────────
+// 【Ducking 音量】打断瞬间，本地先把播放音量压到这个比例（0~1）
+// 0.2 = 压到 20% 音量，保留一点声音避免突兀；后端确认真打断后再完全静音
+// 调 0 = 立即完全静音（更果断，但误判时突兀）
+DUCKING_GAIN = 0.2
+
+// 【Ducking 生效时长】ducking 后多少毫秒内，若后端未确认打断，恢复音量
+// 防止 VAD 误报（如咳嗽）导致音量一直很低
+// 调大 → 更保守，误报时音量低更久；调小 → 恢复快
+DUCKING_TIMEOUT_MS = 800
+
+// 【Silero VAD 人声阈值】高于此值判定为「有人声」
+// 调大 → 更严格（只认明显人声）；调小 → 更敏感
+VAD_POSITIVE_THRESHOLD = 0.4
+
+// 【Silero VAD 静音阈值】低于此值判定为「静音」（人声结束）
+VAD_NEGATIVE_THRESHOLD = 0.35
+
+// 【最小人声帧数】连续多少帧人声才触发 onSpeechStart（防止单帧噪声误报）
+// 1帧 = 32ms（Silero 默认 frameSamples=1536 @16kHz）
+VAD_MIN_SPEECH_FRAMES = 3
+
+// 【红emotion帧数】静音多少帧后判定人声结束（onSpeechEnd）
+VAD_REDEMPTION_FRAMES = 8
+
+// ── 环形缓存（pre-roll ring buffer）──────────
 // 持续保留最近 2 秒的 PCM 音频，打断时回退取「开口前」的预卷，防丢第一个字
 const PRE_ROLL_BUFFER_SECONDS = 2;   // 环形缓存总长（秒）
 const PRE_ROLL_MS = 256;             // 回退量（毫秒），从VAD触发点往前取这么多
@@ -300,6 +326,12 @@ const PCM_BYTES_PER_SEC = 16000 * 2; // 16kHz 16bit 单声道 = 32000字节/秒
 const PRE_ROLL_BUFFER_BYTES = PRE_ROLL_BUFFER_SECONDS * PCM_BYTES_PER_SEC; // 64000字节
 let preRollBuffer = [];  // 存 {data: Uint8Array, timestamp: number} 的环形队列
 const PRE_ROLL_MS_BYTES = (PRE_ROLL_MS / 1000) * PCM_BYTES_PER_SEC; // 回退字节数
+
+// ── 前端打断状态 ──────────────────────────────
+let duckingActive = false;      // 当前是否处于 ducking 状态
+let duckingTimer = null;        // ducking 恢复定时器
+let ballIsPlaying = false;      // 球球是否正在播放（用于体感层 ducking 判断）
+let pendingPlaybackDone = false; // 是否已收到 reply_end、等待音频真正播完
 
 const statusEl = document.getElementById('status');
 const btnEl = document.getElementById('btn');
@@ -326,6 +358,32 @@ function appendToLastBallMsg(text) {
       children[i].textContent += text;
       break;
     }
+  }
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+// ── ASR 流式展示 ──────────────────────────────────
+let asrPartialEl = null;  // 正在识别的临时行（"你：（正在识别...）"）
+
+function updateAsrPartial(text) {
+  // 用户正在说话，实时显示识别中的文本（流式效果）
+  if (!asrPartialEl) {
+    asrPartialEl = document.createElement('div');
+    asrPartialEl.className = 'log-user';
+    logEl.appendChild(asrPartialEl);
+  }
+  asrPartialEl.textContent = '你：' + text + '▌';  // ▌是光标，表示还在识别
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function finalizeAsr(text) {
+  // ASR 完成：把临时行转正为最终用户消息
+  if (asrPartialEl) {
+    asrPartialEl.textContent = '你：' + text;  // 去掉光标
+    asrPartialEl = null;  // 重置，下次识别新建
+  } else {
+    // 没有过 partial（比如识别很快），直接显示最终结果
+    log('你：' + text, 'log-user');
   }
   logEl.scrollTop = logEl.scrollHeight;
 }
@@ -434,16 +492,20 @@ function onMessage(event) {
       case 'user_text':
         log('你：' + msg.text, 'log-user');
         break;
+      case 'asr_partial':
+        // 流式展示：用户正在说话，实时更新识别中的文本
+        updateAsrPartial(msg.text);
+        break;
+      case 'asr_final':
+        // ASR 完成：把临时展示收尾，转正为最终用户消息
+        finalizeAsr(msg.text);
+        break;
       case 'reply_start':
-        // 后端开始生成回复，标记球球进入「即将/正在说话」状态
+        // 后端开始生成回复，标记球球进入播放状态（用于 ducking 等体感层）
         ballIsPlaying = true;
-        bargeArmed = false;
-        bargeStartTime = null;
         break;
       case 'reply_end':
-        // 后端整段回复发完。但音频块可能还在播放队列里。
-        // 不立即设 ballIsPlaying=false，而是等所有音频块真正播完
-        // （见 feedPcm 里 source.onended），那时才发 client_playback_done 给后端
+        // 后端整段回复发完，等所有音频块真正播完再发 playback_done
         pendingPlaybackDone = true;
         break;
       case 'reply':
@@ -454,10 +516,15 @@ function onMessage(event) {
         // 后续句追加到上一条球球消息后面
         appendToLastBallMsg(msg.text);
         break;
-      case 'barge_in':
+      case 'barge_confirm':
+        // 后端确认「真打断」：完全静音 + 显示打断
         setStatus('打断了球球', 'listening');
         log('⏹ 打断', 'log-sys');
         stopStreamPlayback();
+        break;
+      case 'barge_reject':
+        // 后端判定「误报」：恢复音量
+        stopDucking();
         break;
       case 'tts_start':
         setStatus('球球在说话…', 'speaking');
@@ -698,8 +765,42 @@ function stopStreamPlayback() {
     try { pcmPlayback.ctx.close(); } catch (e) {}
     pcmPlayback = null;
   }
-  // 标记球球停止播放，关闭前端打断检测
-  ballIsPlaying = false;
+}
+
+// ── Ducking：体感层快速压低音量（不立即静音）──────────
+function startDucking() {
+  if (!pcmPlayback || !pcmPlayback.gainNode) return;
+  if (duckingActive) return;  // 已在 ducking，不重复
+
+  duckingActive = true;
+  // 快速压到 DUCKING_GAIN（如20%），用 setTargetAtTime 平滑过渡
+  try {
+    const ctx = pcmPlayback.ctx;
+    const gain = pcmPlayback.gainNode.gain;
+    gain.cancelScheduledValues(ctx.currentTime);
+    gain.setTargetAtTime(DUCKING_GAIN, ctx.currentTime, 0.03);  // 30ms 平滑下降
+  } catch (e) {}
+
+  // 定时恢复：若后端在 DUCKING_TIMEOUT_MS 内没确认打断，恢复音量
+  if (duckingTimer) clearTimeout(duckingTimer);
+  duckingTimer = setTimeout(() => {
+    stopDucking();
+  }, DUCKING_TIMEOUT_MS);
+}
+
+function stopDucking() {
+  if (!duckingActive) return;
+  duckingActive = false;
+  if (duckingTimer) { clearTimeout(duckingTimer); duckingTimer = null; }
+  // 恢复音量到 1
+  if (pcmPlayback && pcmPlayback.gainNode) {
+    try {
+      const ctx = pcmPlayback.ctx;
+      const gain = pcmPlayback.gainNode.gain;
+      gain.cancelScheduledValues(ctx.currentTime);
+      gain.setTargetAtTime(1.0, ctx.currentTime, 0.05);  // 50ms 平滑恢复
+    } catch (e) {}
+  }
 }
 
 // ── 前端 Silero VAD 初始化（人声检测）────────────
@@ -716,30 +817,40 @@ async function initFrontendVad() {
       modelURL: base + 'vad/silero_vad.onnx',
       workletURL: base + 'vad/vad.worklet.bundle.min.js',
       stream: stream,  // 复用已获取的麦克风流（已开 AEC）
-      // 人声检测回调
+      // 人声检测回调（纯事件上报 + 本地 ducking + 预卷上传）
       onSpeechStart: () => {
-        console.log('[VAD] onSpeechStart, ballIsPlaying=' + ballIsPlaying + ', bargeArmed=' + bargeArmed);
-        // 球球正在播放时，检测到人声 = 用户插话 → 打断
-        if (ballIsPlaying && !bargeArmed) {
-          bargeArmed = true;
-          bargeStartTime = performance.now();
-          localBargeIn();
+        console.log('[VAD] onSpeechStart（上报 speech_start + 预卷）');
+        log('【前端VAD】检测到人声 → ducking + 上报预卷', 'log-vad-front');
+        // 1. 本地 ducking：立即压低音量（体感层快速响应）
+        startDucking();
+        // 2. 从环形缓存切出预卷（补VAD触发延迟丢的首字）
+        const preRoll = slicePreRoll();
+        // 3. 上报事件给后端，带上预卷（后端合并二次确认）
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({
+            type: 'speech_start',
+            preRollBase64: preRoll ? arrayBufferToBase64(preRoll.buffer) : null,
+          }));
         }
       },
       onSpeechEnd: () => {
-        // 用户说完，重置打断臂（允许下一次打断）
-        bargeArmed = false;
-        bargeStartTime = null;
+        console.log('[VAD] onSpeechEnd（上报 speech_end 事件）');
+        log('【前端VAD】人声结束 → 上报', 'log-vad-front');
+        // 上报人声结束事件
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'speech_end' }));
+        }
       },
       onVADMisfire: () => {
-        // Silero 误报（短促噪声），重置
-        bargeArmed = false;
-        bargeStartTime = null;
+        console.log('[VAD] onVADMisfire（误报，恢复音量）');
+        log('【前端VAD】误报 → 恢复音量', 'log-vad-front');
+        // VAD 误报：恢复音量，不上报事件
+        stopDucking();
       },
-      positiveSpeechThreshold: 0.5,
-      negativeSpeechThreshold: 0.35,
-      minSpeechFrames: 3,
-      redemptionFrames: 8,
+      positiveSpeechThreshold: VAD_POSITIVE_THRESHOLD,
+      negativeSpeechThreshold: VAD_NEGATIVE_THRESHOLD,
+      minSpeechFrames: VAD_MIN_SPEECH_FRAMES,
+      redemptionFrames: VAD_REDEMPTION_FRAMES,
       preSpeechPadFrames: 1,
     });
     frontendVad.start();
