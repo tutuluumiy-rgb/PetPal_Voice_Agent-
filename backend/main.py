@@ -193,8 +193,8 @@ async def handle_audio_frame(ws: WebSocket, session: ConversationSession, pcm: b
     1. speaking/thinking 期间：缓存音频（打断时回放，防窗口吞字）
     2. listening 且 is_user_speaking：喂给 ASR 实时识别
     """
-    if session.state == "speaking" or session.state == "thinking":
-        # 球球说话/思考期间：缓存音频（打断信号到达后回放给 ASR）
+    if session.state in ("speaking", "thinking", "pending_play"):
+        # 球球说话/思考/待播期间：缓存音频（打断信号到达后回放给 ASR）
         session.speaking_audio_cache.extend(pcm)
         if len(session.speaking_audio_cache) > session.MAX_SPEAKING_CACHE:
             session.speaking_audio_cache = session.speaking_audio_cache[-session.MAX_SPEAKING_CACHE:]
@@ -342,6 +342,34 @@ async def handle_speech_start(ws: WebSocket, session: ConversationSession, pre_r
     _t_recv = _t.time()
     print(f"[状态机] speech_start 到达, 当前 state={session.state}, 到达时刻={_t_recv:.3f}")
 
+    if session.state == "pending_play":
+        # 待播态：TTS已下发但喇叭未响，用户说话了 → 直接丢弃待播任务，切 listening
+        print(f"[状态机] state=pending_play → 丢弃待播任务，切 listening")
+        # 取消当前 TTS 任务（还没播，直接取消）
+        if session.tts_task and not session.tts_task.done():
+            session.tts_task.cancel()
+        session.abort_speaking = True
+        # 启动 ASR，接收用户话
+        loop = asyncio.get_event_loop()
+        partial_buffer = {"text": ""}
+        def _on_partial(delta_text):
+            partial_buffer["text"] += delta_text
+            async def _send():
+                await ws.send_json({"type": "asr_partial", "text": partial_buffer["text"]})
+            asyncio.run_coroutine_threadsafe(_send(), loop)
+        asr.start_streaming(session.session_id, _on_partial)
+        session.is_user_speaking = True
+        session.state = "listening"
+        session.silence_frames = 0
+        session.speech_frames = 0
+        session.frames_since_speech = POST_SPEECH_GUARD_FRAMES
+        # 历史标记：上一轮被打断
+        session.history.append({
+            "role": "user",
+            "content": "(主人打断了球球的上一轮回复，请重新听主人接下来的话)",
+        })
+        return
+
     if session.state == "speaking":
         # 球球正在说话 → 需要后端 VAD 二次确认「这是真人声还是噪声/回声」
         print(f"[状态机] state=speaking → 后端 VAD 二次确认")
@@ -471,7 +499,7 @@ async def handle_user_speech(ws: WebSocket, session: ConversationSession, text: 
     emotion = "平静"
     t_llm_first_sentence = None  # LLM 出第一句的时间（衡量首响延迟）
 
-    session.state = "speaking"
+    session.state = "pending_play"  # 待播态：等前端 play_start 才转 speaking
     session.reset_speech_guard()
     session.barge_energy_baseline = None
     # 新一轮回复开始，清空「说话期间音频缓存」（上一轮打断/说话残留的）
@@ -605,10 +633,16 @@ async def handle_control_message(ws: WebSocket, session: ConversationSession, te
             avg = round(session.timing_sum["barge_in"] / session.barge_count, 3)
             await ws.send_json({"type": "barge_avg", "avg": avg, "count": session.barge_count})
             await session.emit_event(ws, "Barge-in", f"打断延迟 {round(latency*1000)}ms")
+    elif msg_type == "client_play_start":
+        # 前端上报「喇叭真正开始发声」→ 打开打断窗口，确保 state=speaking
+        # 解决排队模式：TTS已下发但喇叭未响时，后端误以为listening
+        if session.state == "listening" or session.state == "pending_play":
+            session.state = "speaking"
+            print("[播放开始] 前端喇叭发声，后端进入 speaking（打断窗口打开）")
     elif msg_type == "client_playback_done":
         # 前端真正播放完，发来此消息 → 后端才进入 listening + 保护期
         # 这是「播放结束」和「TTS发送完」分离的关键
-        if session.state == "speaking":
+        if session.state in ("speaking", "pending_play"):
             session.state = "listening"
             session.reset_speech_guard()  # 播放真正结束后，才开始保护尾音回声
             print("[播放完成] 前端播放完毕，后端进入 listening")

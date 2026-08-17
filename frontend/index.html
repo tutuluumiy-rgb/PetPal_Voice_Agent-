@@ -562,6 +562,11 @@ function onMessage(event) {
           speechStartTime = null;
         }
         startStreamPlayback();
+        // 上报「喇叭真正开始发声」—— 后端据此打开打断窗口
+        // 解决排队模式：TTS已下发但喇叭未响时，后端以为是listening
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'client_play_start' }));
+        }
         break;
       case 'tts_end':
         setStatus('我在听，说吧…', 'listening');
