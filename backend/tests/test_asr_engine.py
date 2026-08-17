@@ -57,18 +57,20 @@ async def main():
         print(f"\n=== 原文: {text} ===")
         print(f"  TTS: 24k 时长 {len(pcm24)/2/24000:.2f}s, 16k 时长 {len(pcm16)/2/16000:.2f}s")
 
-        # 2. ASR 识别
+        # 2. ASR 识别（流式：边发边收 partial）
         session_id = f"asr_test_{len(pcm16)}"
-        partial_buf = {"text": ""}
+        partial_buf = {"text": "", "count": 0}
 
-        def on_partial(delta):
-            partial_buf["text"] += delta
+        def on_partial(stash):
+            # 流式 partial 是全量修订（stash = 当前整句），覆盖而非追加
+            partial_buf["text"] = stash
+            partial_buf["count"] += 1
 
         asr.start_streaming(session_id, on_partial)
         asr.feed(session_id, pcm16)
         result = await asr.finalize(session_id)
 
-        print(f"  ASR 增量累积: {partial_buf['text']!r}")
+        print(f"  ASR partial 次数: {partial_buf['count']}, 最后 partial: {partial_buf['text']!r}")
         print(f"  ASR 最终结果: {result!r}")
         match = result.strip() == text
         print(f"  判定: {'✓ 完全匹配' if match else '✗ 不匹配'}")

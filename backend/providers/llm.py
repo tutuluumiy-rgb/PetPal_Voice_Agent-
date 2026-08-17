@@ -22,10 +22,8 @@ import time
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
-from personality import PERSONA_PROMPT
-from voice_style import VOICE_GUIDE
-from tools import get_tools
-from agent_loop import TOOL_GUIDE, run_tool_loop
+from prompt_loader import build_system_prompt
+from agent_loop import run_tool_loop
 from .base import LLMProvider
 
 load_dotenv()  # 读取 backend/.env
@@ -34,7 +32,21 @@ load_dotenv()  # 读取 backend/.env
 _EMOTION_RE = re.compile(r"\[(开心|委屈|困|好奇|兴奋|平静|难过|害怕)\]")
 
 # 句子切分标点：遇到这些就认为一句结束
-SENTENCE_ENDS = "。！？!?；;…\n"
+# 加了顿号"、"：口语里顿号是短停顿，切句后 TTS 先播第一段，首句更快（优化首句延迟）
+SENTENCE_ENDS = "。！？!?；;…、\n"
+
+# 剥离正文中残留的情绪标签（兜底）：完整 [开心] 或残缺 委屈] / [难过
+# 关键：必须【至少带一个括号】才算标签——防止误删正文里的裸词（如"你委屈了"）
+_EMOTION_STRIP = re.compile(
+    r"\[(开心|委屈|困|好奇|兴奋|平静|难过|害怕)\]"     # 完整 [开心]
+    r"|\[(开心|委屈|困|好奇|兴奋|平静|难过|害怕)"        # 残缺 [难过（无右括号）
+    r"|(开心|委屈|困|好奇|兴奋|平静|难过|害怕)\]"        # 残缺 委屈]（无左括号）
+)
+
+
+def strip_emotion_tags(text: str) -> str:
+    """剥离文本中的情绪标签（含残缺形式），保留正文。进度播报与句子兜底共用。"""
+    return _EMOTION_STRIP.sub("", text).strip()
 
 
 class DeepSeekLLM(LLMProvider):
@@ -70,7 +82,7 @@ class DeepSeekLLM(LLMProvider):
         """流式生成，逐句 yield (句子文本, 情绪标签)"""
         import time
 
-        system_prompt = PERSONA_PROMPT + "\n" + VOICE_GUIDE
+        system_prompt = build_system_prompt()  # 人格 + 语气 + 当前用户档案（prompt_loader 组装）
         messages = [{"role": "system", "content": system_prompt}]
         for msg in history[-20:]:
             messages.append({"role": msg["role"], "content": msg["content"]})
@@ -107,20 +119,17 @@ class DeepSeekLLM(LLMProvider):
         """
         import time
 
-        system_prompt = PERSONA_PROMPT + "\n" + VOICE_GUIDE + "\n" + TOOL_GUIDE
+        system_prompt = build_system_prompt()  # 人格+语气+工具指南+工具目录+用户档案（prompt_loader 组装）
         messages = [{"role": "system", "content": system_prompt}]
         for msg in history[-20:]:
             messages.append({"role": msg["role"], "content": msg["content"]})
         messages.append({"role": "user", "content": user_text})
 
-        tools = get_tools()  # 方案 A：全量注入（3 个工具 ~1.5k tokens，无压力）
-
-        # ── 工具循环：独立模块（agent_loop.py），改工具调用策略只动那个文件 ──
+        # ── 工具循环：两级渐进式（工具目录已在 system prompt，LLM 文本输出 TOOL_CALL 声明）──
         messages, _ = await run_tool_loop(
             self.client,
             self.model,
             messages,
-            tools,
             max_loops=self.max_loops,
             on_progress=on_progress,
             is_cancelled=is_cancelled,
@@ -169,9 +178,10 @@ class DeepSeekLLM(LLMProvider):
                     buffer = buffer.replace(m.group(0), "", 1)
                     emotion_parsed = True
                     if buffer.strip() and buffer.strip()[-1] in SENTENCE_ENDS:
-                        sentence = buffer.strip()
+                        sentence = strip_emotion_tags(buffer)  # 兜底剥离残留/残缺标签
                         buffer = ""
-                        yield sentence, emotion
+                        if sentence:
+                            yield sentence, emotion
                         continue
 
             # 按标点切句：找到【第一个】标点就切出一句
@@ -186,7 +196,7 @@ class DeepSeekLLM(LLMProvider):
                 sentence = buffer[: cut + 1].strip()
                 buffer = buffer[cut + 1 :]
                 if sentence:
-                    yield sentence, emotion
+                    yield strip_emotion_tags(sentence), emotion  # 兜底剥离残留/残缺标签
                 if buffer == "":
                     break
 
@@ -194,4 +204,4 @@ class DeepSeekLLM(LLMProvider):
 
         # 收尾：剩余未切的内容作为最后一句
         if buffer.strip():
-            yield buffer.strip(), emotion
+            yield strip_emotion_tags(buffer), emotion

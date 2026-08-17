@@ -1,0 +1,16 @@
+{
+    "users": [
+        {
+            "id": "user_001",
+            "name": "好兄弟",
+            "role": "owner",
+            "profile": "users/user_001/profile.json"
+        },
+        {
+            "id": "user_002",
+            "name": "女主人",
+            "role": "family",
+            "profile": "users/user_002/profile.json"
+        }
+    ]
+}

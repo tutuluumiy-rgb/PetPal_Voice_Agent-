@@ -61,8 +61,21 @@ class AliyunTTS(TTSProvider):
         self.cancel_event.clear()
 
         params = params or {}
-        emotion = params.get("emotion", "平静")
-        instruction = EMOTION_INSTRUCTIONS.get(emotion, EMOTION_INSTRUCTIONS["平静"])
+        # 兼容两种参数格式：
+        #   A. 情绪状态机输出（emotion_state.EmotionState.get_tts_params）：
+        #      {instructions, speech_rate, volume, pitch_rate}
+        #   B. 旧格式：{"emotion": "开心"} → 查 EMOTION_INSTRUCTIONS 兜底
+        if "speech_rate" in params:
+            instruction = params.get("instructions") or EMOTION_INSTRUCTIONS["平静"]
+            speech_rate = params.get("speech_rate")
+            volume = params.get("volume")
+            pitch_rate = params.get("pitch_rate")
+        else:
+            emotion = params.get("emotion", "平静")
+            instruction = EMOTION_INSTRUCTIONS.get(emotion, EMOTION_INSTRUCTIONS["平静"])
+            speech_rate = None
+            volume = None
+            pitch_rate = None
 
         audio_queue = queue.Queue()
         done_event = threading.Event()
@@ -113,10 +126,14 @@ class AliyunTTS(TTSProvider):
         def _run():
             try:
                 tts.connect()
-                # 配置会话：音色、格式、语气指令
+                # 配置会话：音色、格式、语气指令 + 情绪数值参数（语速/音量/音调）
+                # SDK 对 None 参数不覆盖默认值（speech_rate/volume/pitch_rate 未设置时保持默认）
                 tts.update_session(
                     voice=VOICE_ID,
                     response_format=AudioFormat.PCM_24000HZ_MONO_16BIT,  # 24kHz PCM
+                    speech_rate=speech_rate,
+                    volume=volume,
+                    pitch_rate=pitch_rate,
                     instructions=instruction,
                 )
                 # 发送文本并提交

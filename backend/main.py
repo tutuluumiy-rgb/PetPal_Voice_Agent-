@@ -20,7 +20,9 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 load_dotenv()  # 读取 backend/.env
 
 from providers import get_asr, get_llm, get_tts
+from providers.llm import strip_emotion_tags
 from vad_engine import SileroVAD
+from emotion_state import EmotionState
 
 app = FastAPI(title="Ball Ball Pet Voice Pipeline")
 
@@ -93,6 +95,8 @@ backend_vad = SileroVAD(SILERO_MODEL_PATH)  # 后端 Silero VAD（业务层二�
 asr = get_asr()
 llm = get_llm()
 tts = get_tts()
+# 宠物情绪状态机（跨轮保持情绪，随时间向平静衰减，输出 TTS 数值参数）
+emotion_state = EmotionState()
 
 
 # 【语气词黑名单】ASR 识别结果如果只包含这些词（可重复、可带标点），直接丢弃
@@ -316,12 +320,8 @@ async def finish_user_speech(ws: WebSocket, session: ConversationSession):
 
     t_asr_start = time.time()
     await session.emit_event(ws, "ASR", "开始识别", duration=0)
-    # 修复「尾字被掐」：前端 VAD（AudioWorklet）与 ScriptProcessor 并行消费麦克风流，
-    # 两者缓冲进度可能差 ~100-200ms —— VAD 判定静音触发 onSpeechEnd 时，
-    # ScriptProcessor 里可能还有 1~2 块用户话尾音频未发出。
-    # 立即 finalize 会 pop ASR 会话，迟到的尾音块被丢弃 → 识别结果少尾字。
-    # 这里等 200ms，期间主循环继续处理音频块并喂 ASR（会话还没 pop）。
-    await asyncio.sleep(0.2)
+    # 注：真流式 ASR 下，音频已实时入队发送（同连接 FIFO），speech_end 到达前所有音频都
+    #     已进入 ASR 会话，finalize 只是 commit 收尾——无需再 sleep 等待尾音块（移除旧的非流式兜底）。
     print(f"[ASR调试] finalize 前，session_id={session.session_id}")
     text = await asr.finalize(session.session_id)
     print(f"[ASR调试] finalize 返回: {repr(text)}")
@@ -450,7 +450,7 @@ async def handle_speech_start(ws: WebSocket, session: ConversationSession, pre_r
         loop = asyncio.get_event_loop()
         partial_buffer = {"text": ""}
         def _on_partial(delta_text):
-            partial_buffer["text"] += delta_text
+            partial_buffer["text"] = delta_text  # 流式 partial 是全量修订(stash)，覆盖而非追加
             async def _send():
                 await ws.send_json({"type": "asr_partial", "text": partial_buffer["text"]})
             asyncio.run_coroutine_threadsafe(_send(), loop)
@@ -532,7 +532,7 @@ async def handle_speech_start(ws: WebSocket, session: ConversationSession, pre_r
         loop = asyncio.get_event_loop()
         partial_buffer = {"text": ""}
         def _on_partial(delta_text):
-            partial_buffer["text"] += delta_text
+            partial_buffer["text"] = delta_text  # 流式 partial 是全量修订(stash)，覆盖而非追加
             async def _send():
                 await ws.send_json({"type": "asr_partial", "text": partial_buffer["text"]})
             asyncio.run_coroutine_threadsafe(_send(), loop)
@@ -583,7 +583,7 @@ async def handle_speech_start(ws: WebSocket, session: ConversationSession, pre_r
         loop = asyncio.get_event_loop()
         partial_buffer = {"text": ""}
         def _on_partial(delta_text):
-            partial_buffer["text"] += delta_text
+            partial_buffer["text"] = delta_text  # 流式 partial 是全量修订(stash)，覆盖而非追加
             async def _send():
                 await ws.send_json({"type": "asr_partial", "text": partial_buffer["text"]})
             asyncio.run_coroutine_threadsafe(_send(), loop)
@@ -693,6 +693,8 @@ async def handle_user_speech(ws: WebSocket, session: ConversationSession, text: 
     async def _on_progress(progress_text: str):
         """工具执行前的进度播报：事件流 + TTS 播报（不 await，与工具执行并行）"""
         nonlocal progress_task
+        # 剥离进度文本里残留的情绪标签（完整 [开心] 或残缺 委屈]/[难过），避免 TTS 读出
+        progress_text = strip_emotion_tags(progress_text)
         await session.emit_event(ws, "工具", f"执行中：{progress_text}")
         progress_task = asyncio.create_task(
             tts.speak_and_send(ws, progress_text, session.session_id, {"emotion": "平静"})
@@ -744,7 +746,9 @@ async def handle_user_speech(ws: WebSocket, session: ConversationSession, text: 
 
             # 逐句合成 TTS（顺序播放，保证句子顺序正确）
             await session.emit_event(ws, "TTS", f"合成: {sentence[:20]}", duration=0)
-            tts_params = {"emotion": emotion}
+            # 情绪状态机：本轮情绪标签更新状态 → 输出 TTS 数值参数（语速/音量/音调 + 语气指令）
+            emotion_state.update(emo)
+            tts_params = emotion_state.get_tts_params()
             session.tts_task = asyncio.create_task(
                 tts.speak_and_send(ws, sentence, session.session_id, tts_params)
             )
@@ -847,6 +851,11 @@ async def handle_control_message(ws: WebSocket, session: ConversationSession, te
         asr.reset(session.session_id)
         session.is_user_speaking = False
         session.speech_start_ts = None
+        # 通知前端清理流式识别残留行（"你：xxx▌" 没有 asr_final 转正会卡住）
+        try:
+            await ws.send_json({"type": "asr_cancel"})
+        except Exception:
+            pass
     elif msg_type == "speech_end":
         # 前端 VAD 检测到人声结束
         import time as _t_end
@@ -902,7 +911,7 @@ async def handle_control_message(ws: WebSocket, session: ConversationSession, te
         loop = asyncio.get_event_loop()
         partial_buffer = {"text": ""}
         def _on_partial(delta_text):
-            partial_buffer["text"] += delta_text
+            partial_buffer["text"] = delta_text  # 流式 partial 是全量修订(stash)，覆盖而非追加
             async def _send():
                 await ws.send_json({"type": "asr_partial", "text": partial_buffer["text"]})
             asyncio.run_coroutine_threadsafe(_send(), loop)

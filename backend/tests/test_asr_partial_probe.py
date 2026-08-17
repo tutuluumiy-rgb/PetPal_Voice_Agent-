@@ -86,21 +86,18 @@ def probe(audio: bytes):
             return
         events.append(data)
         t = data.get("type", "?")
+        # 打印所有事件的关键字段（排查为什么 transcript 为空）
         if t in ("conversation.item.input_audio_transcription.text",
                  "conversation.item.input_audio_transcription.completed",
                  "error"):
             print(f"  [事件] {t}")
             if t == "conversation.item.input_audio_transcription.text":
-                print(f"         transcript: {data.get('transcript', '')!r}  (delta还是full需对比)")
+                print(f"         transcript: {data.get('transcript', '')!r}")
+                print(f"         原始: {json.dumps(data, ensure_ascii=False)[:300]}")
             elif t == "conversation.item.input_audio_transcription.completed":
-                item = data.get("item", {})
-                content = item.get("content", [])
-                txt = ""
-                if isinstance(content, list) and content:
-                    txt = content[0].get("transcript", "")
-                print(f"         completed: {txt!r}")
+                print(f"         原始: {json.dumps(data, ensure_ascii=False)[:600]}")
             elif t == "error":
-                print(f"         error: {json.dumps(data, ensure_ascii=False)[:200]}")
+                print(f"         error: {json.dumps(data, ensure_ascii=False)[:300]}")
         if t in ("conversation.item.input_audio_transcription.completed", "error", "response.done"):
             done.set()
 

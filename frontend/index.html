@@ -520,8 +520,15 @@ function onMessage(event) {
         log('你：' + msg.text, 'log-user');
         break;
       case 'asr_partial':
-        // 流式展示：用户正在说话，实时更新识别中的文本
+        // 流式展示：用户正在说话，实时更新识别中的文本（后端发全量修订，覆盖展示）
         updateAsrPartial(msg.text);
+        break;
+      case 'asr_cancel':
+        // 误报撤销（后端 vad_cancel）：清掉残留的流式识别行（不会转正为 asr_final）
+        if (asrPartialEl) {
+          asrPartialEl.remove();
+          asrPartialEl = null;
+        }
         break;
       case 'asr_final':
         // ASR 完成：把临时展示收尾，转正为最终用户消息
