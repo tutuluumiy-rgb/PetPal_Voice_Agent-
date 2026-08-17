@@ -5,6 +5,8 @@
   python test_asr.py
 """
 
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import asyncio
 import sys
 import threading
@@ -12,7 +14,7 @@ import threading
 import numpy as np
 import sounddevice as sd
 
-from asr_engine import StreamingASR
+from providers.asr import AliyunASR
 
 SAMPLE_RATE = 16000
 CHUNK = 1600
@@ -23,7 +25,7 @@ async def main():
     print("录音 3 秒，请在这期间说话...")
     print()
 
-    asr = StreamingASR()
+    asr = AliyunASR()
     session_id = "debug_test"
 
     # 累积所有音频，先看能不能录到

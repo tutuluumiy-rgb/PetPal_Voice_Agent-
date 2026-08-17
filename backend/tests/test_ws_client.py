@@ -16,6 +16,8 @@
   python test_ws_client.py
 """
 
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import asyncio
 import base64
 import json
@@ -56,9 +58,9 @@ def find_voice_start(pcm: bytes, frame_ms: int = 20, thr: float = 200.0) -> int:
 
 
 async def main():
-    from tts_engine import TTSEngine
+    from providers.tts import AliyunTTS
 
-    tts = TTSEngine()
+    tts = AliyunTTS()
 
     # 预合成素材
     user_audio = await synth_16k(tts, "从五数到十", 0.3)  # 用户插话（AEC 削弱）

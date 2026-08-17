@@ -8,6 +8,8 @@
   python test_echo_window.py
 """
 
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import asyncio
 
 import numpy as np
@@ -32,9 +34,9 @@ def amp_scale(pcm_bytes: bytes, scale: float) -> bytes:
 async def main():
     from main import _confirm_real_speech
 
-    from tts_engine import TTSEngine
+    from providers.tts import AliyunTTS
 
-    tts = TTSEngine()
+    tts = AliyunTTS()
 
     chunks = []
     async for c in tts.synth_stream("一、二、三、四、五、六、七、八、九、十！数完啦！有奖励吗？"):

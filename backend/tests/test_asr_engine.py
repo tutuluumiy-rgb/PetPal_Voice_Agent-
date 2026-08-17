@@ -9,12 +9,14 @@
   python test_asr_engine.py
 """
 
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import asyncio
 
 import numpy as np
 
-from asr_engine import StreamingASR
-from tts_engine import TTSEngine
+from providers.asr import AliyunASR
+from providers.tts import AliyunTTS
 
 # 与用户实测相关的短句 + 常见对话句
 TEXTS = [
@@ -38,8 +40,8 @@ def downsample_24k_to_16k(pcm_bytes: bytes) -> bytes:
 
 
 async def main():
-    tts = TTSEngine()
-    asr = StreamingASR()
+    tts = AliyunTTS()
+    asr = AliyunASR()
 
     print("=" * 60)
     print("环节1：ASR 引擎单独测试（干净音频，无 AEC/VAD/打断干扰）")

@@ -10,6 +10,8 @@ C. 第二轮球球回复中再次打断 → 连续打断稳定性
   python test_ws_concurrent.py
 """
 
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import asyncio
 import base64
 import json
@@ -55,9 +57,9 @@ def make_pre_roll(pcm: bytes, voice_start: int) -> bytes:
 
 
 async def main():
-    from tts_engine import TTSEngine
+    from providers.tts import AliyunTTS
 
-    tts = TTSEngine()
+    tts = AliyunTTS()
 
     # 素材：插话B="从二数到十"，打断后立即说 B2="从三数到十"，再插话 C="从四数到十"
     mats = {}

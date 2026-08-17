@@ -1,12 +1,10 @@
-"""流式 ASR 引擎（阿里云 Qwen3-ASR-Flash-Realtime）
+"""ASR Provider：阿里云 Qwen3-ASR-Flash-Realtime（迁自 asr_engine.py）
 
 采用「攒整句 + 一次性识别 + 增量展示」模式：
 - 用户说话时，音频累积在本地（不发云端）
 - 用户说完（端点检测触发），一次性发云端识别
 - 云端返回增量 text 时，通过 on_partial 回调实时展示（流式效果）
 - completed 时返回最终完整文本
-
-这样连接生命周期是「一次识别一个连接」，干净可靠，且保留流式展示。
 
 API Key 优先用 ASR_API_KEY，否则回退 DASHSCOPE_API_KEY。
 """
@@ -21,6 +19,8 @@ import websocket  # websocket-client
 
 from dotenv import load_dotenv
 
+from .base import ASRProvider
+
 load_dotenv()
 
 ASR_MODEL = os.getenv("ASR_MODEL", "qwen3-asr-flash-realtime")
@@ -30,7 +30,7 @@ SAMPLE_RATE = 16000
 WS_URL = f"wss://dashscope.aliyuncs.com/api-ws/v1/realtime?model={ASR_MODEL}"
 
 
-class StreamingASR:
+class AliyunASR(ASRProvider):
     """流式识别器：累积音频，finalize 时识别并实时回调增量文本"""
 
     def __init__(self):

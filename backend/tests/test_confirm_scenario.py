@@ -13,6 +13,8 @@
   python test_confirm_scenario.py
 """
 
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import asyncio
 
 import numpy as np
@@ -43,9 +45,9 @@ async def synth_16k(tts, text: str) -> bytes:
 async def main():
     from main import _confirm_real_speech
 
-    from tts_engine import TTSEngine
+    from providers.tts import AliyunTTS
 
-    tts = TTSEngine()
+    tts = AliyunTTS()
 
     # 球球回声（AEC 后残留弱化）—— 模拟球球正在说话
     ball = amp_scale(await synth_16k(tts, "一、二、三、四、五、六、七、八、九、十！数完啦！有奖励吗？"), 0.15)

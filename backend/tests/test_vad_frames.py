@@ -8,6 +8,8 @@
   python test_vad_frames.py
 """
 
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import asyncio
 
 import numpy as np
@@ -46,10 +48,10 @@ def frame_probs(vad, audio: bytes, threshold: float):
 async def main():
     from vad_engine import SileroVAD
 
-    from tts_engine import TTSEngine
+    from providers.tts import AliyunTTS
 
     vad = SileroVAD(r"../frontend/vad/silero_vad.onnx")
-    tts = TTSEngine()
+    tts = AliyunTTS()
 
     chunks = []
     async for c in tts.synth_stream("从五数到十"):

@@ -11,6 +11,8 @@
   python test_tail_cut.py
 """
 
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import asyncio
 import json
 import os
@@ -63,9 +65,9 @@ async def run_scenario(ws, head: bytes, tail: bytes, label: str):
 
 
 async def main():
-    from tts_engine import TTSEngine
+    from providers.tts import AliyunTTS
 
-    tts = TTSEngine()
+    tts = AliyunTTS()
     user_audio = await synth_16k(tts, "从五数到十")
     print(f"[素材] 同一段音频 {len(user_audio)/2/SAMPLE_RATE*1000:.0f}ms")
     cut = int(len(user_audio) * 0.85)

@@ -1,4 +1,4 @@
-"""TTS 嗓子引擎（阿里云 Qwen-TTS 流式版）
+"""TTS Provider：阿里云 Qwen-TTS 流式版（迁自 tts_engine.py）
 
 用 dashscope 的 QwenTtsRealtime 类，实现真正的流式合成：
 - WebSocket 连接，边合成边返回音频增量（response.audio.delta）
@@ -16,6 +16,7 @@ import dashscope
 from dashscope.audio.qwen_tts_realtime import QwenTtsRealtime, QwenTtsRealtimeCallback, AudioFormat
 
 from voice_style import EMOTION_INSTRUCTIONS
+from .base import TTSProvider
 
 load_dotenv()
 
@@ -30,11 +31,12 @@ if DASHSCOPE_API_KEY:
     dashscope.api_key = DASHSCOPE_API_KEY
 
 
-class TTSEngine:
+class AliyunTTS(TTSProvider):
     def __init__(self):
         if not DASHSCOPE_API_KEY:
             raise RuntimeError("未配置 DASHSCOPE_API_KEY，请在 backend/.env 里填写")
         self.cancel_event = threading.Event()  # 全局取消标志，打断时设置
+        self.first_audio_time = None  # 暴露给 main.py 读取（TTS 首包时间）
 
     def cancel(self):
         """打断时调用：立即停止当前合成"""
@@ -66,7 +68,7 @@ class TTSEngine:
         done_event = threading.Event()
         t_start = time.time()
         first_audio_time = {"t": None}  # 首包到达时间（相对 t_start）
-        self.first_audio_time = None  # 暴露给 main.py 读取
+        self.first_audio_time = None  # 每句重置，暴露给 main.py
 
         class _Callback(QwenTtsRealtimeCallback):
             def on_open(self):

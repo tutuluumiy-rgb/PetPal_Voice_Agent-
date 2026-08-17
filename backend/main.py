@@ -19,9 +19,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 load_dotenv()  # 读取 backend/.env
 
-from asr_engine import StreamingASR
-from llm_engine import ChatEngine
-from tts_engine import TTSEngine
+from providers import get_asr, get_llm, get_tts
 from vad_engine import SileroVAD
 
 app = FastAPI(title="Ball Ball Pet Voice Pipeline")
@@ -44,8 +42,8 @@ POST_SPEECH_GUARD_FRAMES = 10
 # 前端AEC会消掉大部分插话声，后端缓存里的人声被弱化，所以阈值不能太严
 # 调大 → 更严格（只认真人声）；调小 → 更敏感
 # 实测（test_diag_weak.py）：开口瞬间的弱音段 Silero 概率仅 0.2~0.47，
-# 0.45 阈值会把正常插话误判为噪声（「误报」根因之一），降到 0.35 兼顾敏感度与回声鲁棒
-BACKEND_VAD_THRESHOLD = 0.35
+# 0.45 阈值会把正常插话误判为噪声（「误报」 根因之一），降到 0.35 兼顾敏感度与回声鲁棒
+BACKEND_VAD_THRESHOLD = 0.6
 
 # 【二次确认人声帧占比】缓存音频里，人声帧占总帧数的比例阈值
 # 真人声「大部分帧都是人声」，噪声/回声则零星几帧
@@ -53,9 +51,14 @@ BACKEND_VAD_THRESHOLD = 0.35
 # 调大 → 更严格；调小 → 更敏感
 CONFIRM_SPEECH_RATIO = 0.05
 
+# 【短缓存人声占比（更严）】cache 不足 2 个观察窗口时（能量基线不可用，无法做
+# 能量跃升辅助判断），用此更严的人声占比阈值，防止「人声类误报」（清嗓子/说话声/
+# 耳机漏音）在 cache 短时被 15ms 快速误断。真插话占比通常 0.5+，0.3 仍能通过。
+CONFIRM_SPEECH_RATIO_SHORT = 0.3
+
 # 【二次确认最小缓存时长】缓存音频至少多少毫秒才做二次确认
-# 缓存太短（<100ms）无法可靠判断，直接拒绝
-CONFIRM_MIN_AUDIO_MS = 100
+# 缓存太短（<200ms）无法可靠判断，直接拒绝（宁可不打断，不误打断）
+CONFIRM_MIN_AUDIO_MS = 200
 
 # 【二次确认取音频窗口】只取缓存里「最近」多少毫秒做二次确认
 # 原因：球球说话期间，缓存里大部分是球球回声（AEC消过但能量低），
@@ -67,6 +70,17 @@ CONFIRM_MIN_AUDIO_MS = 100
 # 调大 → 覆盖更多语音，弱音段不易误拒；调小 → 更聚焦你的插话，但可能截断
 CONFIRM_WINDOW_MS = 512
 
+# 【二次确认能量跃升阈值】最近窗口 vs 前一窗口（球球回声基线）的能量比值
+# 用户插话 = 能量从回声基线显著跃升；平稳噪音/持续回声 = 前后能量相近
+# Silero VAD 无法区分「球球回声」和「用户插话」（都是人声特征），
+# 实测纯回声占比 0.5+ 会被误判 → 用能量跃升辅助判别：
+#   比值低于阈值 且 前窗口确有声音 → 判定平稳噪音/回声，拒绝打断
+# 1.3→2.0→3.0：球球说话中语音本身能量有起伏（字间波动 jump 常见 1.3~2，强音字可更高），
+#           原阈值把球球自身波动误判成"插话"→ 后端判定过松（前端都 misfire 了后端还 confirm）；
+#           提到 3.0 后，只有明显的能量突变（真插话）才确认，后端判定更准确
+# 调大 → 更严格（只认明显能量突变）；调小 → 更宽松（弱插话也能打断）
+CONFIRM_ENERGY_JUMP = 3.0
+
 # 【Silero 模型路径】后端 VAD 模型（复用前端下载的）
 SILERO_MODEL_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -75,9 +89,10 @@ SILERO_MODEL_PATH = os.path.join(
 
 # ── 全局组件 ──────────────────────────────────────────
 backend_vad = SileroVAD(SILERO_MODEL_PATH)  # 后端 Silero VAD（业务层二次确认）
-asr = StreamingASR()
-llm = ChatEngine()
-tts = TTSEngine()
+# 通过工厂获取云接口（可插拔：换 ASR/TTS/LLM 只改 .env 的 *_PROVIDER 配置）
+asr = get_asr()
+llm = get_llm()
+tts = get_tts()
 
 
 # 【语气词黑名单】ASR 识别结果如果只包含这些词（可重复、可带标点），直接丢弃
@@ -113,6 +128,7 @@ class ConversationSession:
         self.pending_user_text = ""  # 累积的用户输入
         self.vad_buffer = b""  # VAD 分帧缓冲（累积到 30ms 再喂 VAD）
         self.last_asr_time = 0  # 最近一次 ASR 耗时
+        self.speech_start_ts = None  # 最近一次 speech_start 到达时刻（用于会话过期兜底）
         self.frames_since_speech = 0  # 球球说话后的静默保护计数（从0递增）
         self.is_user_speaking = False  # 当前是否已确认用户正在说话
         self.is_barge_in_speaking = False  # 打断场景：是否已确认用户在插话
@@ -237,6 +253,28 @@ def _confirm_real_speech(audio_cache: bytearray) -> bool:
     window_bytes = int(SAMPLE_RATE * CONFIRM_WINDOW_MS / 1000 * 2)
     recent_audio = bytes(audio_cache[-window_bytes:]) if len(audio_cache) > window_bytes else bytes(audio_cache)
 
+    # 能量跃升检测（防噪音/回声被误判为打断）：
+    # Silero VAD 无法区分「球球回声」和「用户插话」（都是人声特征，实测纯回声占比 0.5+ 误判）。
+    # 用户插话 = 能量从球球回声基线显著跃升；平稳噪音/持续回声 = 前后窗口能量相近。
+    # 若前一窗口（回声基线）确有声音、且最近窗口能量没有显著跃升 → 判定平稳噪音/回声，拒绝。
+    prev_bytes = int(SAMPLE_RATE * CONFIRM_WINDOW_MS / 1000 * 2)
+    if len(audio_cache) >= 2 * prev_bytes:
+        try:
+            import numpy as _np2
+            prev_audio = bytes(audio_cache[-2 * prev_bytes:-prev_bytes])
+            prev_np = _np2.frombuffer(prev_audio, dtype=_np2.int16).astype(_np2.float32)
+            prev_rms = float(_np2.sqrt(_np2.mean(prev_np ** 2))) if len(prev_np) > 0 else 0.0
+            recent_np2 = _np2.frombuffer(recent_audio, dtype=_np2.int16).astype(_np2.float32)
+            recent_rms2 = float(_np2.sqrt(_np2.mean(recent_np2 ** 2))) if len(recent_np2) > 0 else 0.0
+            if prev_rms > 30:  # 前一窗口确有声音（球球回声基线存在）
+                jump = recent_rms2 / prev_rms if prev_rms > 0 else 0.0
+                if jump < CONFIRM_ENERGY_JUMP:
+                    print(f"[二次确认] 能量无跃升（jump={jump:.2f} < {CONFIRM_ENERGY_JUMP}，前窗RMS={prev_rms:.0f}→近窗RMS={recent_rms2:.0f}），判定平稳噪音/回声，拒绝打断")
+                    return False
+                print(f"[二次确认] 能量跃升（jump={jump:.2f} ≥ {CONFIRM_ENERGY_JUMP}），判定用户插话")
+        except Exception as e:
+            print(f"[二次确认] 能量跃升检测异常: {e}")
+
     # 调试：打印音频特征，确认数据正确
     total_bytes = len(audio_cache)
     recent_bytes = len(recent_audio)
@@ -252,12 +290,15 @@ def _confirm_real_speech(audio_cache: bytearray) -> bool:
         print(f"[二次确认DEBUG] 能量计算失败: {e}")
 
     try:
+        # cache 不足 2 窗口（能量基线不可用，无法做能量跃升辅助）→ 用更严的人声占比，
+        # 防止「人声类误报」在短缓存时被快速误断（cache 足够长时能量判断已拦下平稳噪音）
+        ratio_thr = CONFIRM_SPEECH_RATIO if len(audio_cache) >= 2 * prev_bytes else CONFIRM_SPEECH_RATIO_SHORT
         is_speech, ratio = backend_vad.is_speech(
             recent_audio,
             BACKEND_VAD_THRESHOLD,
-            ratio_threshold=CONFIRM_SPEECH_RATIO,
+            ratio_threshold=ratio_thr,
         )
-        print(f"[二次确认] 取最近{CONFIRM_WINDOW_MS}ms, 人声帧占比={ratio:.2f}, 阈值={CONFIRM_SPEECH_RATIO}, 结果={'确认人声' if is_speech else '判定噪声'}")
+        print(f"[二次确认] 取最近{CONFIRM_WINDOW_MS}ms, 人声帧占比={ratio:.2f}, 阈值={ratio_thr}, 结果={'确认人声' if is_speech else '判定噪声'}")
         return is_speech
     except Exception as e:
         print(f"[二次确认] 异常: {e}")
@@ -294,6 +335,13 @@ async def finish_user_speech(ws: WebSocket, session: ConversationSession):
         # 语气词被过滤，恢复 listening 状态，让主循环继续端点检测
         session.state = "listening"
         session.reset_speech_guard()
+        # 修复：若这次是「打断后无有效输入」（用户其实没真说话 / 误断），
+        # 通知前端恢复之前被打断的播报（前端 barge_confirm 时只是静音等待，未销毁播放器）。
+        # 正常说话被过滤时前端无 pendingResume，此消息无害。
+        try:
+            await ws.send_json({"type": "resume_playback"})
+        except Exception:
+            pass
         return
 
     await session.emit_event(ws, "ASR", f"识别结果：{text}", duration=round(t_asr, 2))
@@ -376,11 +424,21 @@ async def handle_speech_start(ws: WebSocket, session: ConversationSession, pre_r
     # 防重入：listening 且已在识别中（前端 VAD 抖动/双触发）→ 忽略本次 speech_start
     # 修复：之前重复触发会再次 start_streaming，覆盖 ASR 会话，丢掉已累积的音频
     if session.state == "listening" and session.is_user_speaking:
-        print(f"[状态机] speech_start 重复触发（is_user_speaking=True），忽略")
-        return
+        # 过期兜底：若上次 speech_start 已很久（>8s）且没有 speech_end / vad_cancel，
+        # 说明是前端误报（misfire 后未撤销），先重置说话状态再重新开始，
+        # 否则 is_user_speaking 永远卡 True，用户真实说话会被下面 else 忽略 → LLM 被阻塞
+        if session.speech_start_ts is not None and _t.time() - session.speech_start_ts > 8:
+            print(f"[状态机] 上次 speech_start 已过期（{_t.time()-session.speech_start_ts:.0f}s 无结束），重置说话状态")
+            asr.reset(session.session_id)
+            session.is_user_speaking = False
+            session.speech_start_ts = None
+        else:
+            print(f"[状态机] speech_start 重复触发（is_user_speaking=True），忽略")
+            return
 
     if session.state == "pending_play":
         # 待播态：TTS已下发但喇叭未响，用户说话了 → 直接丢弃待播任务，切 listening
+        # （快速打断，不走 ASR——与 speaking 分支一致的 16ms 级响应）
         print(f"[状态机] state=pending_play → 丢弃待播任务，切 listening")
         # 取消当前 TTS 任务（还没播，直接取消）+ 整条流水线任务
         if session.tts_task and not session.tts_task.done():
@@ -397,8 +455,8 @@ async def handle_speech_start(ws: WebSocket, session: ConversationSession, pre_r
                 await ws.send_json({"type": "asr_partial", "text": partial_buffer["text"]})
             asyncio.run_coroutine_threadsafe(_send(), loop)
         asr.start_streaming(session.session_id, _on_partial)
-        # 修复：把预卷 + 待播期间缓存的音频喂给 ASR（防窗口吞字）
-        # 之前 pending_play 分支只启动会话不喂音频，用户待播窗口开口的首字直接丢失
+        session.speech_start_ts = _t.time()  # 记录本次 speech_start 时刻（会话过期兜底）
+        # 把预卷 + 待播期间缓存的音频喂给 ASR（防窗口吞字）
         if pre_roll_b64:
             try:
                 import base64 as _b64
@@ -448,9 +506,10 @@ async def handle_speech_start(ws: WebSocket, session: ConversationSession, pre_r
             await ws.send_json({"type": "barge_reject"})
             return
 
-        # 二次确认通过：真打断
+        # 二次确认通过：确认真打断（快速，~16ms，不走 ASR——ASR 确认太慢影响打断体验）
         _t_confirm = _t.time()
-        print(f"[状态机] 二次确认通过 → 确认真打断, 后端处理耗时={(_t_confirm - _t_recv)*1000:.0f}ms")
+        _backend_ms = (_t_confirm - _t_recv) * 1000
+        print(f"[状态机] 二次确认通过 → 确认真打断, 后端处理耗时={_backend_ms:.0f}ms")
         await session.emit_event(ws, "后端VAD", "二次确认判定人声 → 确认真打断")
         print(f"[打断DEBUG] 打断前 tts_task 状态: done={session.tts_task.done() if session.tts_task else 'None'}")
         # 1. 取消 TTS 和 LLM 流水线（先停当前句 TTS，再取消整条流水线任务）
@@ -462,10 +521,7 @@ async def handle_speech_start(ws: WebSocket, session: ConversationSession, pre_r
             session.user_speech_task.cancel()
         print(f"[打断DEBUG] 已设置 abort_speaking=True、cancel tts_task 和 user_speech_task")
 
-        # 2. 通知前端「确认真打断」，前端完全静音
-        # 计算后端处理耗时（到达→确认）并随 barge_confirm 传给前端
-        _t_now = _t.time()
-        _backend_ms = (_t_now - _t_recv) * 1000
+        # 2. 通知前端「确认真打断」，前端 ducking 等待（流水线已取消，缓冲播完自然结束）
         print(f"[打断DEBUG] barge_confirm 已发送, 后端处理耗时={_backend_ms:.0f}ms")
         await ws.send_json({
             "type": "barge_confirm",
@@ -481,6 +537,7 @@ async def handle_speech_start(ws: WebSocket, session: ConversationSession, pre_r
                 await ws.send_json({"type": "asr_partial", "text": partial_buffer["text"]})
             asyncio.run_coroutine_threadsafe(_send(), loop)
         asr.start_streaming(session.session_id, _on_partial)
+        session.speech_start_ts = _t.time()  # 记录本次 speech_start 时刻（会话过期兜底）
 
         # 4. 把用户插话相关音频喂给 ASR（防窗口吞字）：
         #    - 前端预卷（开口前256ms）：补 VAD 触发延迟丢的首字
@@ -531,6 +588,7 @@ async def handle_speech_start(ws: WebSocket, session: ConversationSession, pre_r
                 await ws.send_json({"type": "asr_partial", "text": partial_buffer["text"]})
             asyncio.run_coroutine_threadsafe(_send(), loop)
         asr.start_streaming(session.session_id, _on_partial)
+        session.speech_start_ts = _t.time()  # 记录本次 speech_start 时刻（会话过期兜底）
         session.is_user_speaking = True
         session.silence_frames = 0
         session.speech_frames = 0
@@ -630,14 +688,50 @@ async def handle_user_speech(ws: WebSocket, session: ConversationSession, text: 
     # ── 架构修复：整条流水线包 try/except/finally ──
     # 任务化后，打断时主循环会 cancel 本任务。这里捕获 CancelledError 做清理
     # （停掉当前句 TTS，防后台线程继续发音频），并重新抛出传播取消状态。
+    progress_task = None  # 工具执行前的进度播报任务（与工具执行并行，正式回复前等播完）
+
+    async def _on_progress(progress_text: str):
+        """工具执行前的进度播报：事件流 + TTS 播报（不 await，与工具执行并行）"""
+        nonlocal progress_task
+        await session.emit_event(ws, "工具", f"执行中：{progress_text}")
+        progress_task = asyncio.create_task(
+            tts.speak_and_send(ws, progress_text, session.session_id, {"emotion": "平静"})
+        )
+
     try:
-        async for sentence, emo in llm.chat_stream(text, session.history):
+        # 方案 A：LLM 工具自路由（无显式模式/路由层）——
+        # LLM 自己决定调不调工具、调几轮；yield ("progress", 文本) 或 ("reply", 句子, 情绪)
+        async for item in llm.agent_chat(
+            text, session.history,
+            on_progress=_on_progress,
+            is_cancelled=lambda: session.abort_speaking,
+        ):
             # 被打断：停止后续句子的生成和播放
             if session.abort_speaking:
                 print(f"[打断DEBUG] 循环检测到 abort_speaking，退出流水线")
                 break
 
+            kind = item[0]
+            if kind == "progress":
+                # 进度播报已由 on_progress 触发 TTS（与工具执行并行），这里只需等待正式回复
+                continue
+
+            sentence, emo = item[1], item[2]
+
             if full_reply == "":
+                # 第一条正式回复：立即停止进度播报，直接转最终回复（不等进度播完）
+                if progress_task is not None and not progress_task.done():
+                    progress_task.cancel()
+                    try:
+                        await progress_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                    progress_task = None
+                    # 通知前端立即停掉进度音频播放（否则前端还会播完已缓冲的进度音频）
+                    try:
+                        await ws.send_json({"type": "stop_playback"})
+                    except Exception:
+                        pass
                 emotion = emo
                 t_llm_first_sentence = time.time() - t0
                 # 第一句：通知前端显示完整回复的开头（后续追加）
@@ -744,6 +838,15 @@ async def handle_control_message(ws: WebSocket, session: ConversationSession, te
         # 前端 VAD 检测到人声（纯事件上报 + 预卷上传，后端做业务决策）
         await session.emit_event(ws, "前端VAD", "检测到人声（speech_start）")
         await handle_speech_start(ws, session, msg.get("preRollBase64"))
+    elif msg_type == "vad_cancel":
+        # 前端判定上次 speech_start 是误报（onVADMisfire）→ 撤销 ASR 会话 + 重置说话状态。
+        # 修复：之前 misfire 只恢复音量，后端已启动的 ASR 会话和 is_user_speaking 会一直卡着，
+        #      导致后续用户真实说话被防重入忽略 / 音频喂进噪声会话 → 识别错乱、LLM 被阻塞
+        print(f"[状态机] 收到 vad_cancel（前端判定误报），撤销 ASR 会话")
+        await session.emit_event(ws, "前端VAD", "误报撤销（vad_cancel）")
+        asr.reset(session.session_id)
+        session.is_user_speaking = False
+        session.speech_start_ts = None
     elif msg_type == "speech_end":
         # 前端 VAD 检测到人声结束
         import time as _t_end
