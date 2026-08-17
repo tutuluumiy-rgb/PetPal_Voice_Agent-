@@ -338,7 +338,9 @@ async def handle_speech_start(ws: WebSocket, session: ConversationSession, pre_r
     双层架构：前端负责体感（已做 ducking + 上传预卷），后端负责业务决策。
     二次确认输入 = 前端预卷(256ms) + 后端最近音频，最大观察窗口 CONFIRM_WINDOW_MS。
     """
-    print(f"[状态机] speech_start 到达, 当前 state={session.state}")
+    import time as _t
+    _t_recv = _t.time()
+    print(f"[状态机] speech_start 到达, 当前 state={session.state}, 到达时刻={_t_recv:.3f}")
 
     if session.state == "speaking":
         # 球球正在说话 → 需要后端 VAD 二次确认「这是真人声还是噪声/回声」
@@ -363,7 +365,8 @@ async def handle_speech_start(ws: WebSocket, session: ConversationSession, pre_r
             return
 
         # 二次确认通过：真打断
-        print(f"[状态机] 二次确认通过 → 确认真打断")
+        _t_confirm = _t.time()
+        print(f"[状态机] 二次确认通过 → 确认真打断, 后端处理耗时={(_t_confirm - _t_recv)*1000:.0f}ms")
         await session.emit_event(ws, "后端VAD", "二次确认判定人声 → 确认真打断")
         print(f"[打断DEBUG] 打断前 tts_task 状态: done={session.tts_task.done() if session.tts_task else 'None'}")
         # 1. 取消 TTS 和 LLM 流水线
@@ -374,7 +377,14 @@ async def handle_speech_start(ws: WebSocket, session: ConversationSession, pre_r
         print(f"[打断DEBUG] 已设置 abort_speaking=True 和 cancel tts_task")
 
         # 2. 通知前端「确认真打断」，前端完全静音
-        await ws.send_json({"type": "barge_confirm"})
+        # 计算后端处理耗时（到达→确认）并随 barge_confirm 传给前端
+        _t_now = _t.time()
+        _backend_ms = (_t_now - _t_recv) * 1000
+        print(f"[打断DEBUG] barge_confirm 已发送, 后端处理耗时={_backend_ms:.0f}ms")
+        await ws.send_json({
+            "type": "barge_confirm",
+            "backend_ms": round(_backend_ms, 1),  # 后端二次确认耗时
+        })
 
         # 3. 启动 ASR 会话，准备接收用户插话内容
         loop = asyncio.get_event_loop()
@@ -399,15 +409,7 @@ async def handle_speech_start(ws: WebSocket, session: ConversationSession, pre_r
         session.speech_frames = 0
         session.frames_since_speech = POST_SPEECH_GUARD_FRAMES
 
-        # 6. 记录打断延迟
-        import time
-        if session.speaking_start_time is not None:
-            latency = round(time.time() - session.speaking_start_time, 2)
-            session.barge_count += 1
-            session.timing_sum["barge_in"] += latency
-            avg = round(session.timing_sum["barge_in"] / session.barge_count, 3)
-            await ws.send_json({"type": "barge_avg", "avg": avg, "count": session.barge_count})
-            await session.emit_event(ws, "Barge-in", f"打断响应 {round(latency*1000)}ms")
+        # 6. 打断延迟已改为前端上报（barge_latency 消息），这里不再计算
         session.speaking_start_time = None
 
         # 7. 打断历史标记：让 LLM 不延续旧话题
@@ -594,6 +596,15 @@ async def handle_control_message(ws: WebSocket, session: ConversationSession, te
         # 前端 VAD 检测到人声结束
         await session.emit_event(ws, "前端VAD", "人声结束（speech_end）")
         await handle_speech_end(ws, session)
+    elif msg_type == "barge_latency":
+        # 前端上报「用户开口 → 停止播报」的真实打断延迟
+        latency = msg.get("latency")
+        if latency is not None:
+            session.barge_count += 1
+            session.timing_sum["barge_in"] += latency
+            avg = round(session.timing_sum["barge_in"] / session.barge_count, 3)
+            await ws.send_json({"type": "barge_avg", "avg": avg, "count": session.barge_count})
+            await session.emit_event(ws, "Barge-in", f"打断延迟 {round(latency*1000)}ms")
     elif msg_type == "client_playback_done":
         # 前端真正播放完，发来此消息 → 后端才进入 listening + 保护期
         # 这是「播放结束」和「TTS发送完」分离的关键

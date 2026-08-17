@@ -297,11 +297,11 @@ let frontendVad = null;  // 前端 Silero VAD 实例
 // 【Ducking 音量】打断瞬间，本地先把播放音量压到这个比例（0~1）
 // 0.2 = 压到 20% 音量，保留一点声音避免突兀；后端确认真打断后再完全静音
 // 调 0 = 立即完全静音（更果断，但误判时突兀）
-DUCKING_GAIN = 0.2
+DUCKING_GAIN = 0.1
 
-// 【Ducking 生效时长】ducking 后多少毫秒内，若后端未确认打断，恢复音量
-// 防止 VAD 误报（如咳嗽）导致音量一直很低
-// 调大 → 更保守，误报时音量低更久；调小 → 恢复快
+// 【Ducking 生效时长】已废弃（不再用超时恢复）
+// ducking 结束由 barge_confirm/barge_reject/onSpeechEnd 三个事件控制
+// 保留变量名以防回滚，当前不生效
 DUCKING_TIMEOUT_MS = 800
 
 // 【Silero VAD 人声阈值】高于此值判定为「有人声」
@@ -332,6 +332,9 @@ let duckingActive = false;      // 当前是否处于 ducking 状态
 let duckingTimer = null;        // ducking 恢复定时器
 let ballIsPlaying = false;      // 球球是否正在播放（用于体感层 ducking 判断）
 let pendingPlaybackDone = false; // 是否已收到 reply_end、等待音频真正播完
+let confirmedDucking = false;   // 后端已确认打断：保持 ducking 直到 speech_end 才真正停止
+let speechStartTime = null;     // 用户开口时刻（performance.now），用于算打断延迟
+let speechSendTime = null;      // speech_start 消息发送时刻（用于分解传输延迟）
 
 const statusEl = document.getElementById('status');
 const btnEl = document.getElementById('btn');
@@ -458,7 +461,7 @@ async function start() {
       }
 
       // 前端打断检测由 Silero VAD 的 onSpeechStart 回调触发（见 initFrontendVad）
-      // 这里不再做能量判断，直接发送音频（打断时也不停发，保证不丢字）
+      // 音频始终发送（保证不丢字）
       ws.send(pcm.buffer);
     };
     source.connect(processor);
@@ -517,17 +520,47 @@ function onMessage(event) {
         appendToLastBallMsg(msg.text);
         break;
       case 'barge_confirm':
-        // 后端确认「真打断」：完全静音 + 显示打断
+        // 后端确认「真打断」：立即停止播报（不等 speech_end）
         setStatus('打断了球球', 'listening');
-        log('⏹ 打断', 'log-sys');
+        // 分解打断延迟为三个阶段
+        if (speechStartTime !== null) {
+          const now = performance.now();
+          const totalMs = now - speechStartTime;
+          // 阶段0：开口 → VAD确认（前端VAD判定耗时）
+          const vadMs = (speechSendTime !== null ? speechSendTime - speechStartTime : 0);
+          // 阶段1：发送 → 后端确认返回（网络传输 + 后端二次确认）
+          const networkMs = now - (speechSendTime !== null ? speechSendTime : speechStartTime);
+          // 后端二次确认耗时（由后端随 barge_confirm 传回）
+          const backendMs = msg.backend_ms !== undefined ? msg.backend_ms : 0;
+          log('⏹ 打断（' + totalMs.toFixed(0) + 'ms）', 'log-sys');
+          console.log(`[打断阶段] 总=${totalMs.toFixed(0)}ms | VAD=${vadMs.toFixed(0)}ms | 传输=${(networkMs - backendMs).toFixed(0)}ms | 后端确认=${backendMs.toFixed(0)}ms`);
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'barge_latency', latency: parseFloat((totalMs / 1000).toFixed(3)) }));
+          }
+        } else {
+          log('⏹ 打断（延迟未知）', 'log-sys');
+        }
+        // 立即停止播放
         stopStreamPlayback();
+        confirmedDucking = false;
+        duckingActive = false;
+        speechStartTime = null;
+        speechSendTime = null;
         break;
       case 'barge_reject':
-        // 后端判定「误报」：恢复音量
+        // 后端判定「误报」：恢复音量 + 显示给用户
+        log('⏹ 误报（后端判噪声，恢复音量）', 'log-vad-back');
         stopDucking();
         break;
       case 'tts_start':
         setStatus('球球在说话…', 'speaking');
+        // 新一轮播放开始，恢复 ducking 状态
+        // 但注意：如果正处于「打断确认等待期」（duckingActive 且未确认），
+        // 不能恢复音量，否则打断确认前的 ducking 会被撤销
+        confirmedDucking = false;
+        if (!duckingActive) {
+          speechStartTime = null;
+        }
         startStreamPlayback();
         break;
       case 'tts_end':
@@ -769,36 +802,41 @@ function stopStreamPlayback() {
 
 // ── Ducking：体感层快速压低音量（不立即静音）──────────
 function startDucking() {
-  if (!pcmPlayback || !pcmPlayback.gainNode) return;
-  if (duckingActive) return;  // 已在 ducking，不重复
+  // 只有球球正在播放时才需要 ducking
+  if (!pcmPlayback || !pcmPlayback.gainNode) {
+    console.log('[ducking] 球球没在播放，跳过 ducking, pcmPlayback=', pcmPlayback);
+    return;
+  }
 
   duckingActive = true;
-  // 快速压到 DUCKING_GAIN（如20%），用 setTargetAtTime 平滑过渡
+  console.log('[ducking] 执行 ducking, 当前gain=', pcmPlayback.gainNode.gain.value);
   try {
     const ctx = pcmPlayback.ctx;
     const gain = pcmPlayback.gainNode.gain;
     gain.cancelScheduledValues(ctx.currentTime);
-    gain.setTargetAtTime(DUCKING_GAIN, ctx.currentTime, 0.03);  // 30ms 平滑下降
-  } catch (e) {}
-
-  // 定时恢复：若后端在 DUCKING_TIMEOUT_MS 内没确认打断，恢复音量
-  if (duckingTimer) clearTimeout(duckingTimer);
-  duckingTimer = setTimeout(() => {
-    stopDucking();
-  }, DUCKING_TIMEOUT_MS);
+    gain.setTargetAtTime(DUCKING_GAIN, ctx.currentTime, 0.03);
+    console.log('[ducking] 已设置目标 gain=', DUCKING_GAIN, '当前', ctx.currentTime);
+  } catch (e) {
+    console.log('[ducking] 异常:', e);
+  }
+  // 注意：这里不设置超时恢复！
+  // ducking 的结束由三个事件控制，互斥：
+  //   1. barge_confirm → 保持 ducking，等 speech_end 才停
+  //   2. barge_reject → stopDucking 恢复
+  //   3. onSpeechEnd（confirmedDucking）→ stopStreamPlayback
+  // 设置超时会导致「后端还在确认，前端先恢复音量」的竞态
 }
 
 function stopDucking() {
-  if (!duckingActive) return;
+  // 无条件恢复音量（不能依赖 duckingActive，误报恢复时可能已是 false）
   duckingActive = false;
   if (duckingTimer) { clearTimeout(duckingTimer); duckingTimer = null; }
-  // 恢复音量到 1
   if (pcmPlayback && pcmPlayback.gainNode) {
     try {
       const ctx = pcmPlayback.ctx;
       const gain = pcmPlayback.gainNode.gain;
       gain.cancelScheduledValues(ctx.currentTime);
-      gain.setTargetAtTime(1.0, ctx.currentTime, 0.05);  // 50ms 平滑恢复
+      gain.setTargetAtTime(1.0, ctx.currentTime, 0.05);
     } catch (e) {}
   }
 }
@@ -821,12 +859,15 @@ async function initFrontendVad() {
       onSpeechStart: () => {
         console.log('[VAD] onSpeechStart（上报 speech_start + 预卷）');
         log('【前端VAD】检测到人声 → ducking + 上报预卷', 'log-vad-front');
+        // 0. 记录用户开口时刻（用于算打断延迟：开口 → 停止播报）
+        speechStartTime = performance.now();
         // 1. 本地 ducking：立即压低音量（体感层快速响应）
         startDucking();
         // 2. 从环形缓存切出预卷（补VAD触发延迟丢的首字）
         const preRoll = slicePreRoll();
         // 3. 上报事件给后端，带上预卷（后端合并二次确认）
         if (ws && ws.readyState === WebSocket.OPEN) {
+          speechSendTime = performance.now();  // 记录发送时刻
           ws.send(JSON.stringify({
             type: 'speech_start',
             preRollBase64: preRoll ? arrayBufferToBase64(preRoll.buffer) : null,
@@ -836,6 +877,17 @@ async function initFrontendVad() {
       onSpeechEnd: () => {
         console.log('[VAD] onSpeechEnd（上报 speech_end 事件）');
         log('【前端VAD】人声结束 → 上报', 'log-vad-front');
+        // 兜底：如果 barge_confirm 后还有残余播放（极少数情况），speech_end 时清理
+        if (confirmedDucking) {
+          stopStreamPlayback();
+          confirmedDucking = false;
+          duckingActive = false;
+          speechStartTime = null;
+        }
+        // 重要：非打断场景（后端没发 barge_reject 就正常说话了）也恢复音量
+        // 否则 ducking 会一直卡着（球球刚播完你开口，speech_start 走 listening 分支，
+        // 后端不发 barge_reject，音量永远恢复不了）
+        stopDucking();
         // 上报人声结束事件
         if (ws && ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: 'speech_end' }));
