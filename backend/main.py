@@ -43,7 +43,9 @@ POST_SPEECH_GUARD_FRAMES = 10
 # 【人声概率阈值】后端判定一帧为「人声」的 Silero 概率阈值
 # 前端AEC会消掉大部分插话声，后端缓存里的人声被弱化，所以阈值不能太严
 # 调大 → 更严格（只认真人声）；调小 → 更敏感
-BACKEND_VAD_THRESHOLD = 0.45
+# 实测（test_diag_weak.py）：开口瞬间的弱音段 Silero 概率仅 0.2~0.47，
+# 0.45 阈值会把正常插话误判为噪声（「误报」根因之一），降到 0.35 兼顾敏感度与回声鲁棒
+BACKEND_VAD_THRESHOLD = 0.35
 
 # 【二次确认人声帧占比】缓存音频里，人声帧占总帧数的比例阈值
 # 真人声「大部分帧都是人声」，噪声/回声则零星几帧
@@ -60,8 +62,10 @@ CONFIRM_MIN_AUDIO_MS = 100
 #       你的插话声只在最后。取整个缓存会导致人声占比被回声稀释（如3%）。
 #       所以只取「最近」这一段（含你的插话声）。
 # 注意：与前端预卷回退量(PRE_ROLL_MS=256)对齐，窗口太宽会混入回声稀释人声占比
-# 调大 → 取更多音频，可能混入回声；调小 → 更聚焦你的插话，但可能截断
-CONFIRM_WINDOW_MS = 256
+# 实测：256ms 窗口（8帧）太短，恰好取到开口弱音段时占比≈0（误报）；
+#       加大到 512ms（16帧）覆盖语音主体，显著降低弱音段误拒
+# 调大 → 覆盖更多语音，弱音段不易误拒；调小 → 更聚焦你的插话，但可能截断
+CONFIRM_WINDOW_MS = 512
 
 # 【Silero 模型路径】后端 VAD 模型（复用前端下载的）
 SILERO_MODEL_PATH = os.path.join(
@@ -105,6 +109,7 @@ class ConversationSession:
         self.silence_frames = 0      # 连续静音帧数（用于终点检测）
         self.speech_frames = 0       # 连续人声帧数（用于最短时长确认）
         self.tts_task = None  # 正在播放的 TTS 任务
+        self.user_speech_task = None  # 整条「LLM+TTS 流水线」任务（架构修复：独立任务，不阻塞主循环）
         self.pending_user_text = ""  # 累积的用户输入
         self.vad_buffer = b""  # VAD 分帧缓冲（累积到 30ms 再喂 VAD）
         self.last_asr_time = 0  # 最近一次 ASR 耗时
@@ -202,6 +207,13 @@ async def handle_audio_frame(ws: WebSocket, session: ConversationSession, pcm: b
 
     # listening 状态：如果用户正在说话（前端 speech_start 已触发），喂给 ASR
     if session.is_user_speaking:
+        # 球球说完后的静默保护期（POST_SPEECH_GUARD_FRAMES 帧内跳过喂 ASR，防尾音回声误识别）
+        # 修复：保护期之前只赋值从未检查，实际未生效。
+        # 注意：用户确认开口（speech_start 到达）时 handle_speech_start 会立即结束保护，
+        #       所以这里不会吞掉用户首字（开口前的首字由前端预卷 256ms 补上）。
+        if session.frames_since_speech < POST_SPEECH_GUARD_FRAMES:
+            session.frames_since_speech += 1
+            return
         asr.feed(session.session_id, pcm)
 
 
@@ -263,6 +275,12 @@ async def finish_user_speech(ws: WebSocket, session: ConversationSession):
 
     t_asr_start = time.time()
     await session.emit_event(ws, "ASR", "开始识别", duration=0)
+    # 修复「尾字被掐」：前端 VAD（AudioWorklet）与 ScriptProcessor 并行消费麦克风流，
+    # 两者缓冲进度可能差 ~100-200ms —— VAD 判定静音触发 onSpeechEnd 时，
+    # ScriptProcessor 里可能还有 1~2 块用户话尾音频未发出。
+    # 立即 finalize 会 pop ASR 会话，迟到的尾音块被丢弃 → 识别结果少尾字。
+    # 这里等 200ms，期间主循环继续处理音频块并喂 ASR（会话还没 pop）。
+    await asyncio.sleep(0.2)
     print(f"[ASR调试] finalize 前，session_id={session.session_id}")
     text = await asr.finalize(session.session_id)
     print(f"[ASR调试] finalize 返回: {repr(text)}")
@@ -282,7 +300,20 @@ async def finish_user_speech(ws: WebSocket, session: ConversationSession):
     session.last_asr_time = round(t_asr, 2)
     # 通知前端 ASR 完成，收尾流式展示（把 asr_partial 的状态转正为最终结果）
     await ws.send_json({"type": "asr_final", "text": text})
-    await handle_user_speech(ws, session, text)
+
+    # ── 架构修复：handle_user_speech 作为独立任务运行，不阻塞主循环 ──
+    # 之前同步 await 导致 LLM+TTS 流水线（10~30s）期间 WebSocket 消息无人处理，
+    # 打断消息（speech_start/音频帧）只能排队等整轮回复完成 → 打断延迟秒级。
+    # 任务化后主循环立即回到 receive，speech_start 实时处理 → 打断延迟降至百毫秒级。
+    if session.user_speech_task and not session.user_speech_task.done():
+        # 上一轮流水线还在跑（用户连续说话）→ 先取消再启动新一轮，防两个流水线并发
+        print(f"[流水线] 上一轮流水线仍在运行，先取消再启动新一轮")
+        session.user_speech_task.cancel()
+        try:
+            await session.user_speech_task
+        except (asyncio.CancelledError, Exception):
+            pass
+    session.user_speech_task = asyncio.create_task(handle_user_speech(ws, session, text))
     session.reset_episode()
 
 
@@ -342,13 +373,21 @@ async def handle_speech_start(ws: WebSocket, session: ConversationSession, pre_r
     _t_recv = _t.time()
     print(f"[状态机] speech_start 到达, 当前 state={session.state}, 到达时刻={_t_recv:.3f}")
 
+    # 防重入：listening 且已在识别中（前端 VAD 抖动/双触发）→ 忽略本次 speech_start
+    # 修复：之前重复触发会再次 start_streaming，覆盖 ASR 会话，丢掉已累积的音频
+    if session.state == "listening" and session.is_user_speaking:
+        print(f"[状态机] speech_start 重复触发（is_user_speaking=True），忽略")
+        return
+
     if session.state == "pending_play":
         # 待播态：TTS已下发但喇叭未响，用户说话了 → 直接丢弃待播任务，切 listening
         print(f"[状态机] state=pending_play → 丢弃待播任务，切 listening")
-        # 取消当前 TTS 任务（还没播，直接取消）
+        # 取消当前 TTS 任务（还没播，直接取消）+ 整条流水线任务
         if session.tts_task and not session.tts_task.done():
             session.tts_task.cancel()
         session.abort_speaking = True
+        if session.user_speech_task and not session.user_speech_task.done():
+            session.user_speech_task.cancel()
         # 启动 ASR，接收用户话
         loop = asyncio.get_event_loop()
         partial_buffer = {"text": ""}
@@ -358,6 +397,20 @@ async def handle_speech_start(ws: WebSocket, session: ConversationSession, pre_r
                 await ws.send_json({"type": "asr_partial", "text": partial_buffer["text"]})
             asyncio.run_coroutine_threadsafe(_send(), loop)
         asr.start_streaming(session.session_id, _on_partial)
+        # 修复：把预卷 + 待播期间缓存的音频喂给 ASR（防窗口吞字）
+        # 之前 pending_play 分支只启动会话不喂音频，用户待播窗口开口的首字直接丢失
+        if pre_roll_b64:
+            try:
+                import base64 as _b64
+                pre_roll_pcm = _b64.b64decode(pre_roll_b64)
+                asr.feed(session.session_id, pre_roll_pcm)
+                print(f"[状态机] pending_play：已喂入前端预卷")
+            except Exception as e:
+                print(f"[状态机] pending_play：预卷解码失败: {e}")
+        if len(session.speaking_audio_cache) > 0:
+            asr.feed(session.session_id, bytes(session.speaking_audio_cache))
+            session.speaking_audio_cache = bytearray()
+            print(f"[状态机] pending_play 打断：已喂入待播缓存音频")
         session.is_user_speaking = True
         session.state = "listening"
         session.silence_frames = 0
@@ -373,17 +426,20 @@ async def handle_speech_start(ws: WebSocket, session: ConversationSession, pre_r
     if session.state == "speaking":
         # 球球正在说话 → 需要后端 VAD 二次确认「这是真人声还是噪声/回声」
         print(f"[状态机] state=speaking → 后端 VAD 二次确认")
-        # 二次确认 = 前端预卷 + 后端最近音频 合并
-        confirm_audio = session.speaking_audio_cache
+        # 二次确认输入 = 前端预卷 + 后端最近音频 合并
+        # 修复：预卷（开口前256ms）必须拼在【前面】。_confirm_real_speech 只取
+        #       「最近 CONFIRM_WINDOW_MS=256ms」，如果预卷拼末尾，最近256ms 全是
+        #       开口前的静音/回声 → RMS≈0 → 误判噪声 → 正常插话被误报拒绝（实测复现）
+        pre_roll_pcm = None
         if pre_roll_b64:
             try:
                 import base64 as _b64
                 pre_roll_pcm = _b64.b64decode(pre_roll_b64)
-                # 预卷在最后（你开口的那段），拼到缓存末尾
-                confirm_audio = confirm_audio + bytearray(pre_roll_pcm)
-                print(f"[状态机] 合并前端预卷 {len(pre_roll_pcm)} 字节")
+                print(f"[状态机] 解码前端预卷 {len(pre_roll_pcm)} 字节")
             except Exception as e:
                 print(f"[状态机] 预卷解码失败: {e}")
+
+        confirm_audio = bytearray(pre_roll_pcm or b"") + session.speaking_audio_cache
 
         if not _confirm_real_speech(confirm_audio):
             # 二次确认失败：可能是球球回声或噪声，拒绝打断
@@ -397,12 +453,14 @@ async def handle_speech_start(ws: WebSocket, session: ConversationSession, pre_r
         print(f"[状态机] 二次确认通过 → 确认真打断, 后端处理耗时={(_t_confirm - _t_recv)*1000:.0f}ms")
         await session.emit_event(ws, "后端VAD", "二次确认判定人声 → 确认真打断")
         print(f"[打断DEBUG] 打断前 tts_task 状态: done={session.tts_task.done() if session.tts_task else 'None'}")
-        # 1. 取消 TTS 和 LLM 流水线
+        # 1. 取消 TTS 和 LLM 流水线（先停当前句 TTS，再取消整条流水线任务）
         tts.cancel()
         if session.tts_task and not session.tts_task.done():
             session.tts_task.cancel()
         session.abort_speaking = True
-        print(f"[打断DEBUG] 已设置 abort_speaking=True 和 cancel tts_task")
+        if session.user_speech_task and not session.user_speech_task.done():
+            session.user_speech_task.cancel()
+        print(f"[打断DEBUG] 已设置 abort_speaking=True、cancel tts_task 和 user_speech_task")
 
         # 2. 通知前端「确认真打断」，前端完全静音
         # 计算后端处理耗时（到达→确认）并随 barge_confirm 传给前端
@@ -424,11 +482,21 @@ async def handle_speech_start(ws: WebSocket, session: ConversationSession, pre_r
             asyncio.run_coroutine_threadsafe(_send(), loop)
         asr.start_streaming(session.session_id, _on_partial)
 
-        # 4. 把球球说话期间缓存的音频喂给 ASR（防窗口吞字）
+        # 4. 把用户插话相关音频喂给 ASR（防窗口吞字）：
+        #    - 前端预卷（开口前256ms）：补 VAD 触发延迟丢的首字
+        #    - 缓存尾部最近 1s：用户开口后的部分
+        #    修复：之前喂整段缓存（最长2s，大部分是球球回声），
+        #          ASR 先识别出球球说的话再识别用户话 → 识别错乱/丢字（实测「从无属」）
+        if pre_roll_pcm:
+            asr.feed(session.session_id, pre_roll_pcm)
+            print(f"[状态机] 已喂入前端预卷 {len(pre_roll_pcm)} 字节")
         if len(session.speaking_audio_cache) > 0:
-            asr.feed(session.session_id, bytes(session.speaking_audio_cache))
+            cache_tail_ms = 1000  # 只取最近 1 秒（用户开口后的音频）
+            tail_bytes = int(SAMPLE_RATE * cache_tail_ms / 1000 * 2)
+            cache_tail = session.speaking_audio_cache[-tail_bytes:]
+            asr.feed(session.session_id, bytes(cache_tail))
             session.speaking_audio_cache = bytearray()
-            print(f"[状态机] 已喂入 speaking 缓存音频")
+            print(f"[状态机] 已喂入缓存尾部 {len(cache_tail)} 字节")
 
         # 5. 进入 listening，重置端点检测，让用户的话能被识别
         session.state = "listening"
@@ -466,6 +534,9 @@ async def handle_speech_start(ws: WebSocket, session: ConversationSession, pre_r
         session.is_user_speaking = True
         session.silence_frames = 0
         session.speech_frames = 0
+        # 用户已被前端 VAD 确认真开口 → 立即结束静默保护期，
+        # 否则球球说完后用户马上开口，保护期内的实时音频会被跳过吞掉首字
+        session.frames_since_speech = POST_SPEECH_GUARD_FRAMES
 
 
 async def handle_speech_end(ws: WebSocket, session: ConversationSession):
@@ -484,82 +555,12 @@ async def handle_speech_end(ws: WebSocket, session: ConversationSession):
         await finish_user_speech(ws, session)
 
 
-async def handle_user_speech(ws: WebSocket, session: ConversationSession, text: str):
-    """用户说完一句话：进入思考 → LLM 流式逐句 → TTS 逐句合成播放"""
-    import time
+def _build_timing_stats(session, t0, t_llm_first_sentence, t_llm, t_tts):
+    """计算本轮耗时统计（current + avg），正常收尾与打断补发共用
 
-    session.state = "thinking"
-    t0 = time.time()
-    # 用户说的话已由 asr_final 消息展示（ASR 流式收尾），这里不再发 user_text
-    await session.emit_event(ws, "LLM", "开始生成回复", duration=0)
-
-    # ── 句子级流水线：LLM 边生成边逐句发 TTS ──
-    # 不再等 LLM 生成完才 TTS，而是 LLM 生成第一句就开始合成播放
-    full_reply = ""
-    emotion = "平静"
-    t_llm_first_sentence = None  # LLM 出第一句的时间（衡量首响延迟）
-
-    session.state = "pending_play"  # 待播态：等前端 play_start 才转 speaking
-    session.reset_speech_guard()
-    session.barge_energy_baseline = None
-    # 新一轮回复开始，清空「说话期间音频缓存」（上一轮打断/说话残留的）
-    session.speaking_audio_cache = bytearray()
-    session.barge_consecutive_speech = 0
-    session.speaking_start_time = time.time()
-    session.abort_speaking = False  # 新一轮说话，清空打断标志
-
-    # 发「回复开始」信号，前端据此标记 ballIsPlaying=true
-    await ws.send_json({"type": "reply_start"})
-
-    t_tts_start = time.time()
-
-    async for sentence, emo in llm.chat_stream(text, session.history):
-        # 被打断：停止后续句子的生成和播放
-        if session.abort_speaking:
-            print(f"[打断DEBUG] 循环检测到 abort_speaking，退出流水线")
-            break
-
-        if full_reply == "":
-            emotion = emo
-            t_llm_first_sentence = time.time() - t0
-            # 第一句：通知前端显示完整回复的开头（后续追加）
-            await ws.send_json({"type": "reply", "text": sentence, "emotion": emotion})
-        else:
-            # 后续句子：追加显示
-            await ws.send_json({"type": "reply_append", "text": sentence})
-
-        full_reply += sentence
-
-        # 逐句合成 TTS（顺序播放，保证句子顺序正确）
-        await session.emit_event(ws, "TTS", f"合成: {sentence[:20]}", duration=0)
-        tts_params = {"emotion": emotion}
-        session.tts_task = asyncio.create_task(
-            tts.speak_and_send(ws, sentence, session.session_id, tts_params)
-        )
-        try:
-            await session.tts_task  # 等这句播完再播下一句（保证顺序）
-        except asyncio.CancelledError:
-            # 这句被打断取消，退出流水线
-            print(f"[打断DEBUG] 当前句 TTS 被取消，退出流水线")
-            break
-        except Exception:
-            # WebSocket 断开等异常，退出流水线，避免后台任务抛未捕获异常
-            return
-
-    t_llm = time.time() - t0
-    t_tts = time.time() - t_tts_start
-
-    # 记录对话历史
-    session.history.append({"role": "user", "content": text})
-    session.history.append({"role": "assistant", "content": full_reply})
-
-    await session.emit_event(
-        ws, "LLM",
-        f"首字 {getattr(llm, 'first_token_time', 0)}s，首句 {round(t_llm_first_sentence or 0,2)}s，完成 {round(t_llm,2)}s，情绪[{emotion}]",
-        duration=round(t_llm, 2),
-    )
-
-    # ── 统计本轮耗时，发送看板数据 ──
+    - 正常收尾：LLM 完整生成 + TTS 完整发送
+    - 打断补发：t_tts 传 0（TTS 未完整发送），数据是部分值，但仍计入平均
+    """
     tts_first = getattr(tts, "first_audio_time", None)  # TTS首包（第一句合成首包）
     # 端到端首响 = ASR + LLM首字 + LLM生成第一句 + TTS首包
     # t_llm_first_sentence 是「LLM开始到第一句生成完」的时间，包含首字+生成第一句
@@ -582,6 +583,127 @@ async def handle_user_speech(ws: WebSocket, session: ConversationSession, text: 
     for k, v in current.items():
         session.timing_sum[k] += v
         avg[k] = round(session.timing_sum[k] / session.timing_count, 2)
+    return current, avg
+
+
+async def _safe_send_timing(ws, current, avg, count):
+    """独立任务发送 timing（供打断补发使用——任务取消状态下不能直接 await 发送）"""
+    try:
+        await ws.send_json({"type": "timing", "current": current, "avg": avg, "count": count})
+    except Exception:
+        pass
+
+
+async def handle_user_speech(ws: WebSocket, session: ConversationSession, text: str):
+    """用户说完一句话：进入思考 → LLM 流式逐句 → TTS 逐句合成播放"""
+    import time
+
+    session.state = "thinking"
+    t0 = time.time()
+    # 用户说的话已由 asr_final 消息展示（ASR 流式收尾），这里不再发 user_text
+    await session.emit_event(ws, "LLM", "开始生成回复", duration=0)
+
+    # ── 句子级流水线：LLM 边生成边逐句发 TTS ──
+    # 不再等 LLM 生成完才 TTS，而是 LLM 生成第一句就开始合成播放
+    full_reply = ""
+    emotion = "平静"
+    t_llm_first_sentence = None  # LLM 出第一句的时间（衡量首响延迟）
+
+    session.state = "pending_play"  # 待播态：等前端 play_start 才转 speaking
+    # 竞态修复（任务化后）：client_play_start 可能在任务设置 pending_play 之前到达
+    #（state 还是 listening，主循环已把它切到 speaking）→ 不要覆盖回 pending_play
+    if session.state != "speaking":
+        session.state = "pending_play"
+    session.reset_speech_guard()
+    session.barge_energy_baseline = None
+    # 新一轮回复开始，清空「说话期间音频缓存」（上一轮打断/说话残留的）
+    session.speaking_audio_cache = bytearray()
+    session.barge_consecutive_speech = 0
+    session.speaking_start_time = time.time()
+    session.abort_speaking = False  # 新一轮说话，清空打断标志
+
+    # 发「回复开始」信号，前端据此标记 ballIsPlaying=true
+    await ws.send_json({"type": "reply_start"})
+
+    t_tts_start = time.time()
+
+    # ── 架构修复：整条流水线包 try/except/finally ──
+    # 任务化后，打断时主循环会 cancel 本任务。这里捕获 CancelledError 做清理
+    # （停掉当前句 TTS，防后台线程继续发音频），并重新抛出传播取消状态。
+    try:
+        async for sentence, emo in llm.chat_stream(text, session.history):
+            # 被打断：停止后续句子的生成和播放
+            if session.abort_speaking:
+                print(f"[打断DEBUG] 循环检测到 abort_speaking，退出流水线")
+                break
+
+            if full_reply == "":
+                emotion = emo
+                t_llm_first_sentence = time.time() - t0
+                # 第一句：通知前端显示完整回复的开头（后续追加）
+                await ws.send_json({"type": "reply", "text": sentence, "emotion": emotion})
+            else:
+                # 后续句子：追加显示
+                await ws.send_json({"type": "reply_append", "text": sentence})
+
+            full_reply += sentence
+
+            # 逐句合成 TTS（顺序播放，保证句子顺序正确）
+            await session.emit_event(ws, "TTS", f"合成: {sentence[:20]}", duration=0)
+            tts_params = {"emotion": emotion}
+            session.tts_task = asyncio.create_task(
+                tts.speak_and_send(ws, sentence, session.session_id, tts_params)
+            )
+            try:
+                await session.tts_task  # 等这句播完再播下一句（保证顺序）
+            except asyncio.CancelledError:
+                # 这句被打断取消，退出流水线
+                print(f"[打断DEBUG] 当前句 TTS 被取消，退出流水线")
+                break
+            except Exception:
+                # WebSocket 断开等异常，退出流水线，避免后台任务抛未捕获异常
+                return
+    except asyncio.CancelledError:
+        # 任务被外部取消（打断）：清理当前句 TTS，防后台线程继续发音频
+        print(f"[流水线] handle_user_speech 被取消（打断），补发部分统计")
+        # 修复：任务处于取消状态不能再 await，用 create_task 补发「打断轮次」的部分 timing。
+        # 否则被打断的轮次不统计 → 看板数据滞后/缺失（用户连续打断时只统计到少量轮次）
+        t_llm = time.time() - t0
+        current, avg = _build_timing_stats(session, t0, t_llm_first_sentence, t_llm, 0)
+        current["interrupted"] = True  # 标记：该轮被打断（部分数据）
+        asyncio.create_task(_safe_send_timing(ws, current, avg, session.timing_count))
+        if session.tts_task and not session.tts_task.done():
+            session.tts_task.cancel()
+        raise
+    except Exception as e:
+        # LLM 流式异常（网络/限流）→ 静默退出，避免任务抛未捕获异常卡死状态机
+        print(f"[流水线] LLM 流式异常: {e}")
+        return
+    finally:
+        # 任何退出路径都确保当前句 TTS 任务被清理
+        if session.tts_task and not session.tts_task.done():
+            session.tts_task.cancel()
+
+    t_llm = time.time() - t0
+    t_tts = time.time() - t_tts_start
+
+    # 记录对话历史
+    session.history.append({"role": "user", "content": text})
+    session.history.append({"role": "assistant", "content": full_reply})
+
+    await session.emit_event(
+        ws, "LLM",
+        f"首字 {getattr(llm, 'first_token_time', 0)}s，首句 {round(t_llm_first_sentence or 0,2)}s，完成 {round(t_llm,2)}s，情绪[{emotion}]",
+        duration=round(t_llm, 2),
+    )
+
+    # ── 统计本轮耗时，发送看板数据 ──
+    current, avg = _build_timing_stats(session, t0, t_llm_first_sentence, t_llm, t_tts)
+    # 修复：打断时任务取消被内层 except CancelledError 消费，break 后走正常收尾路径。
+    # 这里通过 abort_speaking 标记「该轮被打断」，让看板能区分打断轮（部分数据）与完整轮。
+    if session.abort_speaking:
+        current["interrupted"] = True
+        print(f"[流水线] 该轮被打断，timing 标记 interrupted=True")
 
     # 发「回复结束」信号，前端据此标记 ballIsPlaying=false
     await ws.send_json({"type": "reply_end"})
@@ -615,6 +737,8 @@ async def handle_control_message(ws: WebSocket, session: ConversationSession, te
         # 手动停止（按钮）
         if session.tts_task and not session.tts_task.done():
             session.tts_task.cancel()
+        if session.user_speech_task and not session.user_speech_task.done():
+            session.user_speech_task.cancel()
         session.state = "listening"
     elif msg_type == "speech_start":
         # 前端 VAD 检测到人声（纯事件上报 + 预卷上传，后端做业务决策）
@@ -622,6 +746,8 @@ async def handle_control_message(ws: WebSocket, session: ConversationSession, te
         await handle_speech_start(ws, session, msg.get("preRollBase64"))
     elif msg_type == "speech_end":
         # 前端 VAD 检测到人声结束
+        import time as _t_end
+        session.last_speech_end_recv_ts = _t_end.time()  # 记录后端收到 speech_end 时刻（算网络延迟）
         await session.emit_event(ws, "前端VAD", "人声结束（speech_end）")
         await handle_speech_end(ws, session)
     elif msg_type == "barge_latency":
@@ -663,8 +789,10 @@ async def handle_control_message(ws: WebSocket, session: ConversationSession, te
         tts.cancel()
         if session.tts_task and not session.tts_task.done():
             session.tts_task.cancel()
-        # 设置打断标志，让 handle_user_speech 的逐句流水线退出
+        # 设置打断标志 + 取消整条流水线任务，让 handle_user_speech 立即退出
         session.abort_speaking = True
+        if session.user_speech_task and not session.user_speech_task.done():
+            session.user_speech_task.cancel()
 
         # ── 打断后启动流式 ASR 会话（和正常说话路径一致）──
         # 否则预卷和后续音频只被累积，没有会话在识别，finalize 返回空
@@ -731,10 +859,16 @@ async def cleanup_session(session: ConversationSession):
     """连接断开时清理"""
     if session.tts_task and not session.tts_task.done():
         session.tts_task.cancel()
+    if session.user_speech_task and not session.user_speech_task.done():
+        session.user_speech_task.cancel()
     asr.reset(session.session_id)
 
 
 if __name__ == "__main__":
+    import sys
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    # 支持指定端口：python main.py [port]，默认 8001（前端硬编码）
+    # 多实例测试时可用 8002/8003…，避免和正在运行的后端抢端口
+    port = int(os.getenv("PORT", sys.argv[1] if len(sys.argv) > 1 else "8001"))
+    uvicorn.run(app, host="0.0.0.0", port=port)

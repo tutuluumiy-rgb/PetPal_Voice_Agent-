@@ -15,6 +15,8 @@ websockets>=12.0
 openai>=1.40.0
 webrtcvad-wheels>=2.0.11
 numpy
+# 后端 Silero VAD 二次确认（vad_engine.py）依赖 onnxruntime
+onnxruntime>=1.17.0
 python-dotenv>=1.0.1
 httpx>=0.27.0
 dashscope>=1.20.0

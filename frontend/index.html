@@ -335,6 +335,9 @@ let pendingPlaybackDone = false; // 是否已收到 reply_end、等待音频真�
 let confirmedDucking = false;   // 后端已确认打断：保持 ducking 直到 speech_end 才真正停止
 let speechStartTime = null;     // 用户开口时刻（performance.now），用于算打断延迟
 let speechSendTime = null;      // speech_start 消息发送时刻（用于分解传输延迟）
+let playbackDoneTimer = null;   // client_playback_done 兜底定时器（防丢包）
+let userSpeechFinishTs = null;  // 用户输入完成时刻（onSpeechEnd），用于算真实端到端
+let playFirstFrameTs = null;    // 第一帧TTS音频开始播放时刻，用于算真实端到端
 
 const statusEl = document.getElementById('status');
 const btnEl = document.getElementById('btn');
@@ -416,7 +419,11 @@ async function start() {
         log('连接断开', 'log-sys');
       }
     };
-    await new Promise(res => ws.onopen = res);
+    // 等待连接成功；失败时 reject，避免 start() 永远卡在 onopen（原来无 onerror 处理）
+    await new Promise((res, rej) => {
+      ws.onopen = res;
+      ws.onerror = () => rej(new Error('无法连接后端（ws://127.0.0.1:8001），请先启动后端'));
+    });
     log('已连接后端', 'log-sys');
 
     // 2. 获取麦克风（关键：echoCancellation 开启 AEC）
@@ -474,6 +481,11 @@ async function start() {
   } catch (err) {
     log('错误：' + err.message, 'log-sys');
     console.error(err);
+    // 失败时清理资源，避免页面卡死（如 WS 连接失败时 onopen 永不到达）
+    isRunning = false;
+    btnEl.textContent = '开始对话';
+    if (ws) { try { ws.close(); } catch (e) {} ws = null; }
+    if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
   }
 }
 
@@ -554,19 +566,29 @@ function onMessage(event) {
         break;
       case 'tts_start':
         setStatus('球球在说话…', 'speaking');
-        // 新一轮播放开始，恢复 ducking 状态
-        // 但注意：如果正处于「打断确认等待期」（duckingActive 且未确认），
-        // 不能恢复音量，否则打断确认前的 ducking 会被撤销
+        // 新一轮播放开始，但【不】清 speechStartTime！
+        // speechStartTime 用于打断延迟计时，要保留到 barge_confirm 消费。
+        // 如果这里清空，打断确认时 speechStartTime 为 null → 「延迟未知」
         confirmedDucking = false;
-        if (!duckingActive) {
-          speechStartTime = null;
-        }
         startStreamPlayback();
         // 上报「喇叭真正开始发声」—— 后端据此打开打断窗口
         // 解决排队模式：TTS已下发但喇叭未响时，后端以为是listening
         if (ws && ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: 'client_play_start' }));
         }
+        // 兜底：playback_done 丢包防护
+        // 如果 15 秒内没正常发 client_playback_done（onended 丢失），强制补发
+        // 否则后端永远收不到播放完成，打断窗口不闭合
+        if (playbackDoneTimer) clearTimeout(playbackDoneTimer);
+        playbackDoneTimer = setTimeout(() => {
+          if (pendingPlaybackDone) {
+            console.log('[播放兜底] 超时未收到播放完成，强制补发 client_playback_done');
+            pendingPlaybackDone = false;
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: 'client_playback_done' }));
+            }
+          }
+        }, 15000);
         break;
       case 'tts_end':
         setStatus('我在听，说吧…', 'listening');
@@ -757,6 +779,16 @@ function feedPcm(pcm) {
   if (!pcmPlayback.initialized) {
     startAt = ctx.currentTime + 0.02;  // 首块稍等 20ms 缓冲
     pcmPlayback.initialized = true;
+    // 记录第一帧开始播放时刻，计算真实端到端延迟（用户说完 → 喇叭第一帧出声）
+    if (userSpeechFinishTs !== null) {
+      playFirstFrameTs = performance.now();
+      const e2eRealMs = playFirstFrameTs - userSpeechFinishTs;
+      console.log(`[真实端到端] 用户说完→第一帧出声 = ${e2eRealMs.toFixed(0)}ms`);
+      log(`🎯 真实端到端 ${e2eRealMs.toFixed(0)}ms`, 'log-sys');
+      // 清空，避免下一轮误用
+      userSpeechFinishTs = null;
+      playFirstFrameTs = null;
+    }
   } else {
     // 接续上一块，但如果上一块已经播完（nextStartTime 是过去），
     // 就从「当前时间 + 小缓冲」开始，避免追着过去的时间播导致重叠/丢音
@@ -779,6 +811,8 @@ function feedPcm(pcm) {
     if (pcmPlayback && pcmPlayback.activeSources.length === 0 && pendingPlaybackDone) {
       pendingPlaybackDone = false;
       ballIsPlaying = false;
+      // 正常发送，清除兜底定时器
+      if (playbackDoneTimer) { clearTimeout(playbackDoneTimer); playbackDoneTimer = null; }
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'client_playback_done' }));
       }
@@ -787,6 +821,8 @@ function feedPcm(pcm) {
 }
 
 function stopStreamPlayback() {
+  // 打断时清除播放完成兜底定时器（播放已停止，不需要兜底）
+  if (playbackDoneTimer) { clearTimeout(playbackDoneTimer); playbackDoneTimer = null; }
   if (pcmPlayback) {
     // 打断时：1. 立即静音（gain 瞬间归零，消除残音）
     try {
@@ -882,6 +918,8 @@ async function initFrontendVad() {
       onSpeechEnd: () => {
         console.log('[VAD] onSpeechEnd（上报 speech_end 事件）');
         log('【前端VAD】人声结束 → 上报', 'log-vad-front');
+        // 记录用户输入完成时刻（用于真实端到端延迟：说完 → 第一帧出声）
+        userSpeechFinishTs = performance.now();
         // 兜底：如果 barge_confirm 后还有残余播放（极少数情况），speech_end 时清理
         if (confirmedDucking) {
           stopStreamPlayback();

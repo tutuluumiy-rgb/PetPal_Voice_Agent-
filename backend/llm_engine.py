@@ -98,12 +98,15 @@ class ChatEngine:
                         yield sentence, emotion
                         continue
 
-            # 按标点切句：找到最后一个标点，把之前的完整句切出来
+            # 按标点切句：找到【第一个】标点就切出一句（逐句流式，首句尽早 yield）
+            # 修复：原来找「最后一个」标点，导致多句攒成一句才 yield，
+            #       首句延迟被放大，违背「LLM 生成第一句就开播」的流水线设计
             while True:
                 cut = -1
                 for i, ch in enumerate(buffer):
                     if ch in SENTENCE_ENDS:
                         cut = i
+                        break
                 if cut == -1:
                     break
                 sentence = buffer[: cut + 1].strip()
