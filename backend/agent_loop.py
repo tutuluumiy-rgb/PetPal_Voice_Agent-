@@ -25,7 +25,8 @@ DEFAULT_PROGRESS_TEXT = "好的，我来看看~"
 
 
 async def run_tool_loop(client, model, messages: list,
-                        max_loops: int, on_progress=None, is_cancelled=None) -> tuple[list, int]:
+                        max_loops: int, on_progress=None, is_cancelled=None,
+                        extra_body: dict | None = None) -> tuple[list, int]:
     """执行工具自路由循环，直到 LLM 不再输出工具声明或达到上限。
 
     参数:
@@ -35,6 +36,7 @@ async def run_tool_loop(client, model, messages: list,
         max_loops: 工具轮上限（防死循环）
         on_progress: async 回调，工具调用前收到进度文本（用于 TTS 播报）
         is_cancelled: callable，返回 True 时（打断）提前退出循环
+        extra_body: 厂商特殊请求参数（如 DeepSeek 关闭思考），透传给 API
 
     返回:
         (messages, tool_round)：messages 末尾是最终轮前的完整上下文（含工具结果）
@@ -54,7 +56,7 @@ async def run_tool_loop(client, model, messages: list,
             temperature=TOOL_TEMPERATURE,
             max_tokens=15000,
             stream=False,
-            extra_body={"thinking": {"type": "disabled"}},
+            extra_body=extra_body,
         )
         content = resp.choices[0].message.content or ""
 

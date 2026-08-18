@@ -42,4 +42,8 @@ def get_llm():
         from .llm import DeepSeekLLM
 
         return DeepSeekLLM()
-    raise RuntimeError(f"未知 LLM_PROVIDER: {provider}（可用: deepseek）")
+    if provider == "qwen":
+        from .llm import QwenLLM
+
+        return QwenLLM()
+    raise RuntimeError(f"未知 LLM_PROVIDER: {provider}（可用: deepseek, qwen）")
