@@ -1,15 +1,19 @@
 """工具包入口：转发工具加载器（loader.py）
 
-工具定义、目录生成、调用解析、执行都在 tools/loader.py（声明式映射表，新增工具加一条即可）。
-这里保留兼容导出（get_tools/execute_tool），并导出渐进式披露相关接口。
+工具定义、目录生成、调用解析、执行、模式白名单都在 tools/loader.py（声明式映射表）。
+这里保留兼容导出，并导出渐进式披露与模式相关接口。
 """
 
 from .loader import (
     TOOL_DEFINITIONS,
     CALL_BEGIN,
     CALL_END,
+    CHAT_MODE,
+    WORK_MODE,
+    CHAT_MODE_TOOLS,
     get_tool_names,
     get_schema,
+    is_tool_allowed,
     build_catalog_md,
     parse_tool_calls,
     strip_tool_call_block,
@@ -23,18 +27,18 @@ DOMAIN_SEARCH = ["web_search"]
 DOMAIN_GENERAL = ["calculator"]
 
 
-def get_tools(domains: list | None = None) -> list:
+def get_tools(domains: list | None = None, mode: str | None = None) -> list:
     """返回工具 schema 列表（OpenAI function calling 格式）。
 
     渐进式披露后：第一级不再全量注入 API schema（改注入 build_catalog_md 文本目录），
-    此函数保留给「第二级按需取 schema」或外部调用使用。
+    此函数保留给「第二级按需取 schema」或外部调用使用。可按 mode 过滤。
     """
     names = set()
     if domains:
         for d in domains:
             names.update(d)
     elif not domains:
-        names = set(get_tool_names())
+        names = set(get_tool_names(mode))
     return [
         {"type": "function", "function": get_schema(n)}
         for n in names if get_schema(n)

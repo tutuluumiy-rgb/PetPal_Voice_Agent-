@@ -121,7 +121,10 @@ class OpenAICompatLLM(LLMProvider):
         """流式生成，逐句 yield (句子文本, 情绪标签)"""
         import time
 
-        system_prompt = build_system_prompt()  # 人格 + 语气 + 当前用户档案（prompt_loader 组装）
+        from mode_state import get_mode_state
+
+        mode = get_mode_state().get_mode()
+        system_prompt = build_system_prompt(mode)  # 人格 + 语气 + 当前模式工具目录 + 用户档案
         messages = [{"role": "system", "content": system_prompt}]
         for msg in history[-20:]:
             messages.append({"role": msg["role"], "content": msg["content"]})
@@ -143,7 +146,8 @@ class OpenAICompatLLM(LLMProvider):
     # ──────────────────────────────────────────────
     # 工具自路由 Agent 循环（方案 A 核心）
     # ──────────────────────────────────────────────
-    async def agent_chat(self, user_text: str, history: list, on_progress=None, is_cancelled=None):
+    async def agent_chat(self, user_text: str, history: list, on_progress=None, is_cancelled=None,
+                         extra_context: str | None = None):
         """工具自路由生成。
 
         参数:
@@ -151,6 +155,7 @@ class OpenAICompatLLM(LLMProvider):
             history: 对话历史（短期记忆）
             on_progress: async 回调，工具执行前收到进度文本（用于 TTS 播报）
             is_cancelled: callable，返回 True 时（打断）提前退出循环
+            extra_context: 可选系统上下文（如模式切换状态），以 system 消息注入 system_prompt 之后
 
         yield:
             ("progress", 文本)          # 进度播报
@@ -158,13 +163,20 @@ class OpenAICompatLLM(LLMProvider):
         """
         import time
 
-        system_prompt = build_system_prompt()  # 人格+语气+工具指南+工具目录+用户档案（prompt_loader 组装）
+        from mode_state import get_mode_state
+
+        mode = get_mode_state().get_mode()
+        system_prompt = build_system_prompt(mode)  # 人格+语气+当前模式工具指南+目录+用户档案（prompt_loader 组装）
         messages = [{"role": "system", "content": system_prompt}]
+        if extra_context:
+            # 注入系统级上下文（如"已切换模式"状态），让 LLM 知道而不重复播报
+            messages.append({"role": "system", "content": extra_context})
         for msg in history[-20:]:
             messages.append({"role": msg["role"], "content": msg["content"]})
         messages.append({"role": "user", "content": user_text})
 
         # ── 工具循环：两级渐进式（工具目录已在 system prompt，LLM 文本输出 TOOL_CALL 声明）──
+        # mode 透传：execute_tool 按模式白名单校验工具权限
         messages, _ = await run_tool_loop(
             self.client,
             self.model,
@@ -173,6 +185,7 @@ class OpenAICompatLLM(LLMProvider):
             on_progress=on_progress,
             is_cancelled=is_cancelled,
             extra_body=self.extra_body,
+            mode=mode,
         )
 
         # ── 最终轮：流式逐句（复用切句 + 情绪解析）──

@@ -26,7 +26,8 @@ DEFAULT_PROGRESS_TEXT = "好的，我来看看~"
 
 async def run_tool_loop(client, model, messages: list,
                         max_loops: int, on_progress=None, is_cancelled=None,
-                        extra_body: dict | None = None) -> tuple[list, int]:
+                        extra_body: dict | None = None,
+                        mode: str | None = None) -> tuple[list, int]:
     """执行工具自路由循环，直到 LLM 不再输出工具声明或达到上限。
 
     参数:
@@ -37,6 +38,7 @@ async def run_tool_loop(client, model, messages: list,
         on_progress: async 回调，工具调用前收到进度文本（用于 TTS 播报）
         is_cancelled: callable，返回 True 时（打断）提前退出循环
         extra_body: 厂商特殊请求参数（如 DeepSeek 关闭思考），透传给 API
+        mode: 当前模式（chat/work），用于 execute_tool 的白名单校验（None=全开）
 
     返回:
         (messages, tool_round)：messages 末尾是最终轮前的完整上下文（含工具结果）
@@ -88,7 +90,7 @@ async def run_tool_loop(client, model, messages: list,
             args = call.get("args") or {}
             if not name:
                 continue
-            result = await execute_tool(name, args)
+            result = await execute_tool(name, args, mode)
             print(f"[Agent] 工具 {name}({args}) → {result[:60]}...")
             # 工具结果作为 user 消息回填（不带 API tool_call_id，兼容文本声明模式）
             messages.append({"role": "user", "content": f"【工具 {name} 结果】\n{result}"})

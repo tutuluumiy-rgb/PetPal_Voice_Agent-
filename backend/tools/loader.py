@@ -1,12 +1,19 @@
-"""工具加载器：声明式工具映射表 + 目录生成 + 调用解析 + 执行
+"""工具加载器：声明式工具映射表 + 目录生成 + 调用解析 + 执行 + 模式白名单
 
 两级渐进式披露（progressive disclosure）：
-- 第一级：system prompt 注入「可用工具目录」（每个工具的 name/description/parameters 结构化描述，
-  见 build_catalog_md）——LLM 第一轮就能输出正确的调用字段，无需 API tools 参数
-- 第二级：LLM 输出 TOOL_CALL 声明（JSON 块）→ parse_tool_calls 解析 → 执行 → 结果回填 → 继续
+- 第一级：system prompt 注入「可用工具目录」（按当前模式过滤，见 build_catalog_md(mode)）
+- 第二级：LLM 输出 TOOL_CALL 声明（JSON 块）→ parse_tool_calls 解析 → execute_tool 执行
+  → 结果回填 → 继续。execute_tool 按模式白名单在做调用前校验。
 
-新增工具：在 TOOL_DEFINITIONS 加一条（type/name/description/parameters/executor 五要素）即可，
-目录、解析、执行全部自动生效。
+双模式 × 工具权限（语音宠物需求）：
+    闲聊模式（CHAT_MODE）：只开放 web_search / read / calculator（搜索、读取、计算）
+    工作模式（WORK_MODE）：全部工具开放（含 get_weather、bash、write、edit、ask_user_questions）
+    白名单由调用方传入 mode 决定；越权调用直接拒绝，不执行。
+
+新增工具：
+    - 简单工具：在 TOOL_DEFINITIONS 直加一条（type/name/description/parameters/executor）
+    - Harness 工具（read/bash/write/edit/ask_user_questions）：自带 ToolSpec，
+      在 _HARNESS_SPECS 里登记即可（schema/executor/审批声明自动合并）
 """
 
 import json
@@ -16,8 +23,26 @@ from .calculator import calculator
 from .search import web_search
 from .weather import get_weather
 
-# ── 声明式工具映射表 ──────────────────────────────────────
+# ── 模式常量（与 mode_state 保持一致）────────────────────────
+CHAT_MODE = "chat"
+WORK_MODE = "work"
+
+# 闲聊模式工具白名单（用户指定：搜索、读取、计算）
+CHAT_MODE_TOOLS = {"web_search", "read", "calculator"}
+# 工作模式工具白名单（全开）
+WORK_MODE_TOOLS = None  # None = 全量
+
+
+def _tools_for_mode(mode: str) -> set | None:
+    """返回某模式允许的工具名集合；None 表示全量放开。"""
+    if mode == CHAT_MODE:
+        return CHAT_MODE_TOOLS
+    return WORK_MODE_TOOLS  # work 或未知 → 全开
+
+
+# ── 声明式工具映射表 ─────────────────────────────────────────
 # 每个工具：OpenAI function calling schema（type/name/description/parameters）+ executor（执行函数）
+# executor 可能是同步（返回 str/ToolOutput）或 async（返回 str），execute_tool 统一处理
 TOOL_DEFINITIONS = {
     "get_weather": {
         "type": "function",
@@ -69,6 +94,25 @@ TOOL_DEFINITIONS = {
     },
 }
 
+# ── Harness 工具（自带 ToolSpec：schema/executor/审批声明）───
+from .read import TOOL_SPEC as _READ_SPEC
+from .bash import TOOL_SPEC as _BASH_SPEC
+from .write import TOOL_SPEC as _WRITE_SPEC
+from .edit import TOOL_SPEC as _EDIT_SPEC
+from .ask_user_questions import TOOL_SPEC as _ASK_SPEC
+
+_HARNESS_SPECS = [_READ_SPEC, _BASH_SPEC, _WRITE_SPEC, _EDIT_SPEC, _ASK_SPEC]
+
+for _spec in _HARNESS_SPECS:
+    TOOL_DEFINITIONS[_spec.name] = {
+        "type": "function",
+        "function": _spec.definition,
+        "executor": _spec.implementation,
+        # 记录审批声明，供 execute_tool 展示/授权（语⾳全自动时仅元数据）
+        "approval": getattr(_spec, "approval_mode", "REQUIRE_APPROVAL"),
+        "execution_mode": getattr(_spec, "execution_mode", "SEQUENTIAL"),
+    }
+
 # 工具调用声明块分隔符（LLM 按此输出，解析按此切分）
 CALL_BEGIN = "<<<TOOL_CALL>>>"
 CALL_END = "<<<END_TOOL_CALL>>>"
@@ -79,9 +123,14 @@ _CALL_RE = re.compile(
 
 
 # ── 加载器 API ────────────────────────────────────────────
-def get_tool_names() -> list:
-    """全部工具名"""
-    return list(TOOL_DEFINITIONS.keys())
+def get_tool_names(mode: str | None = None) -> list:
+    """工具名列表；mode 指定时按白名单过滤。"""
+    if mode is None:
+        return list(TOOL_DEFINITIONS.keys())
+    allowed = _tools_for_mode(mode)
+    if allowed is None:
+        return list(TOOL_DEFINITIONS.keys())
+    return [n for n in TOOL_DEFINITIONS if n in allowed]
 
 
 def get_schema(name: str) -> dict:
@@ -90,13 +139,28 @@ def get_schema(name: str) -> dict:
     return defn["function"] if defn else None
 
 
-def build_catalog_md() -> str:
-    """生成注入 system prompt 的「可用工具目录」（结构化描述：名称/描述/参数）
+def is_tool_allowed(name: str, mode: str | None) -> bool:
+    """判断某工具在当前模式是否允许。mode=None 表示全量放开。"""
+    if name not in TOOL_DEFINITIONS:
+        return False
+    allowed = _tools_for_mode(mode)
+    if allowed is None:
+        return True
+    return name in allowed
+
+
+def build_catalog_md(mode: str | None = None) -> str:
+    """生成注入 system prompt 的「可用工具目录」（按 mode 过滤）
 
     第一级披露：把这份目录文本注入 prompt，LLM 第一轮就能输出正确的调用字段。
+    mode=None 时默认全量（向后兼容无参调用）。
     """
+    names = get_tool_names(mode)
     lines = ["## 可用工具", "以下是你可以调用的工具。需要时按【工具调用格式】输出调用声明。"]
-    for name, defn in TOOL_DEFINITIONS.items():
+    if mode is not None:
+        lines.append(f"（当前模式 {('工作' if mode == WORK_MODE else '闲聊')}，仅以下工具可用）")
+    for name in names:
+        defn = TOOL_DEFINITIONS[name]
         f = defn["function"]
         lines.append(f"\n### {name}")
         lines.append(f"- 描述：{f.get('description', '')}")
@@ -142,13 +206,40 @@ def strip_tool_call_block(text: str) -> str:
     return _CALL_RE.sub("", text).strip()
 
 
-async def execute_tool(name: str, args: dict) -> str:
-    """执行工具，返回给 LLM 的文本结果。未知工具/异常返回错误说明。"""
+def _tool_result_to_str(result) -> str:
+    """把 executor 的返回值规格化为字符串（兼容 str / ToolOutput / 其他）。"""
+    if result is None:
+        return "（无返回）"
+    if isinstance(result, str):
+        return result
+    # ToolOutput 及含 .content 的对象
+    content = getattr(result, "content", None)
+    if content is None:
+        content = getattr(result, "transcript_content", None)
+    if content is not None:
+        return str(content)
+    return str(result)
+
+
+async def execute_tool(name: str, args: dict, mode: str | None = None) -> str:
+    """执行工具，返回给 LLM 的文本结果。
+
+    调用前做模式白名单校验（越权直接拒绝，不执行）。
+    mode=None 表示全量放开；传入模式则按该模式白名单过滤。
+    """
     defn = TOOL_DEFINITIONS.get(name)
     if defn is None:
         return f"错误：未知工具 {name}"
+    if not is_tool_allowed(name, mode):
+        return (
+            f"错误：工具 {name} 在当前{'闲聊' if mode == CHAT_MODE else '工作'}模式下不可用"
+            "（权限未开放），请不要调用它。"
+        )
     try:
-        return await defn["executor"](**args)
+        result = defn["executor"](**args)
+        if hasattr(result, "__await__"):
+            result = await result
+        return _tool_result_to_str(result)
     except TypeError as e:
         return f"错误：工具 {name} 参数不正确（{e}）"
     except Exception as e:

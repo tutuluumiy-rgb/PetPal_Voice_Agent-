@@ -23,6 +23,7 @@ from providers import get_asr, get_llm, get_tts
 from providers.llm import strip_emotion_tags
 from vad_engine import SileroVAD
 from emotion_state import EmotionState
+from mode_state import ModeState, parse_mode_command, build_switch_context
 
 app = FastAPI(title="Ball Ball Pet Voice Pipeline")
 
@@ -97,6 +98,8 @@ llm = get_llm()
 tts = get_tts()
 # 宠物情绪状态机（跨轮保持情绪，随时间向平静衰减，输出 TTS 数值参数）
 emotion_state = EmotionState()
+# 双模式全局状态机（闲聊/工作；默认闲聊；语音指令 + 手动均可切换）
+mode_state = ModeState()
 
 
 # 【语气词黑名单】ASR 识别结果如果只包含这些词（可重复、可带标点），直接丢弃
@@ -349,6 +352,23 @@ async def finish_user_speech(ws: WebSocket, session: ConversationSession):
     # 通知前端 ASR 完成，收尾流式展示（把 asr_partial 的状态转正为最终结果）
     await ws.send_json({"type": "asr_final", "text": text})
 
+    # ── 语音指令：模式切换（打开工作模式/打开闲聊模式/切换模式，子串部分命中）──
+    # 命中 → 切模式 + 发【文字】系统通知（不播报 TTS），然后把用户整句输入 + 切换状态
+    # 上下文一起送进 LLM 生成第一轮回复（继续处理用户本句的实际任务）。
+    matched, target = parse_mode_command(text)
+    switch_ctx = None
+    if matched:
+        new_mode = mode_state.toggle() if target is None else mode_state.switch(target)
+        print(f"[模式] 语音指令切换 → {mode_state.name()}")
+        await session.emit_event(ws, "模式", f"系统通知：已经切换到{mode_state.name()}")
+        await ws.send_json({
+            "type": "mode_changed",
+            "mode": new_mode,
+            "notice": f"已经切换到{mode_state.name()}，继续处理你的请求",
+        })
+        switch_ctx = build_switch_context(new_mode)
+        # 不 return：继续走 handle_user_speech，把 extra_context 一并送入 LLM
+
     # ── 架构修复：handle_user_speech 作为独立任务运行，不阻塞主循环 ──
     # 之前同步 await 导致 LLM+TTS 流水线（10~30s）期间 WebSocket 消息无人处理，
     # 打断消息（speech_start/音频帧）只能排队等整轮回复完成 → 打断延迟秒级。
@@ -361,7 +381,9 @@ async def finish_user_speech(ws: WebSocket, session: ConversationSession):
             await session.user_speech_task
         except (asyncio.CancelledError, Exception):
             pass
-    session.user_speech_task = asyncio.create_task(handle_user_speech(ws, session, text))
+    session.user_speech_task = asyncio.create_task(
+        handle_user_speech(ws, session, text, extra_context=switch_ctx)
+    )
     session.reset_episode()
 
 
@@ -652,8 +674,12 @@ async def _safe_send_timing(ws, current, avg, count):
         pass
 
 
-async def handle_user_speech(ws: WebSocket, session: ConversationSession, text: str):
-    """用户说完一句话：进入思考 → LLM 流式逐句 → TTS 逐句合成播放"""
+async def handle_user_speech(ws: WebSocket, session: ConversationSession, text: str,
+                             extra_context: str | None = None):
+    """用户说完一句话：进入思考 → LLM 流式逐句 → TTS 逐句合成播放
+
+    extra_context: 可选系统上下文（模式切换状态），一并送入 LLM 生成第一轮回复。
+    """
     import time
 
     session.state = "thinking"
@@ -707,6 +733,7 @@ async def handle_user_speech(ws: WebSocket, session: ConversationSession, text: 
             text, session.history,
             on_progress=_on_progress,
             is_cancelled=lambda: session.abort_speaking,
+            extra_context=extra_context,
         ):
             # 被打断：停止后续句子的生成和播放
             if session.abort_speaking:
@@ -838,6 +865,20 @@ async def handle_control_message(ws: WebSocket, session: ConversationSession, te
         if session.user_speech_task and not session.user_speech_task.done():
             session.user_speech_task.cancel()
         session.state = "listening"
+    elif msg_type == "set_mode":
+        # 手动切换模式：{"type":"set_mode","mode":"chat"|"work"} 或 "toggle"
+        requested = msg.get("mode")
+        if requested == "toggle":
+            new_mode = mode_state.toggle()
+        elif requested in ("chat", "work"):
+            new_mode = mode_state.switch(requested)
+        else:
+            new_mode = mode_state.get_mode()
+        await ws.send_json({"type": "mode_changed", "mode": new_mode})
+        print(f"[模式] 手动切换 → {mode_state.name()}")
+    elif msg_type == "get_mode":
+        # 查询当前模式
+        await ws.send_json({"type": "mode_changed", "mode": mode_state.get_mode()})
     elif msg_type == "speech_start":
         # 前端 VAD 检测到人声（纯事件上报 + 预卷上传，后端做业务决策）
         await session.emit_event(ws, "前端VAD", "检测到人声（speech_start）")

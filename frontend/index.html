@@ -248,7 +248,9 @@
 
     <div id="status">未连接</div>
     <button id="btn" onclick="toggle()">开始对话</button>
-
+    <div style="margin-top:8px;display:flex;gap:8px;align-items:center;">
+      <button id="mode-btn" onclick="toggleMode()" style="padding:6px 12px;border-radius:8px;border:1px solid #89dceb;background:#181825;color:#89dceb;cursor:pointer;font-size:13px;">🔄 模式：闲聊</button>
+    </div>
     <div id="log"></div>
   </div>
 
@@ -414,6 +416,29 @@ async function toggle() {
 // 显式挂到 window，让 HTML 的 onclick="toggle()" 能找到
 window.toggle = toggle;
 
+// ── 双模式（闲聊/工作）手动切换 ──────────────────────────
+let currentMode = 'chat';
+
+function applyMode(mode) {
+  currentMode = (mode === 'work') ? 'work' : 'chat';
+  const el = document.getElementById('mode-btn');
+  if (el) el.textContent = '🔄 模式：' + (currentMode === 'work' ? '工作' : '闲聊');
+}
+window.applyMode = applyMode;
+
+function toggleMode() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) { alert('未连接后端'); return; }
+  ws.send(JSON.stringify({ type: 'set_mode', mode: 'toggle' }));
+}
+window.toggleMode = toggleMode;
+
+function queryMode() {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'get_mode' }));
+  }
+}
+window.queryMode = queryMode;
+
 async function start() {
   try {
     // 1. 连接后端 WebSocket
@@ -437,6 +462,7 @@ async function start() {
       ws.onerror = () => rej(new Error('无法连接后端（ws://127.0.0.1:8001），请先启动后端'));
     });
     log('已连接后端', 'log-sys');
+    queryMode(); // 连接后同步一次后端当前模式，刷新按钮显示
 
     // 2. 获取麦克风（关键：echoCancellation 开启 AEC）
     stream = await navigator.mediaDevices.getUserMedia({
@@ -516,6 +542,11 @@ function onMessage(event) {
   if (typeof event.data === 'string') {
     const msg = JSON.parse(event.data);
     switch (msg.type) {
+      case 'mode_changed':
+        // 双模式切换（语音指令或手动）→ 更新按钮 + 文字系统通知（不播报）
+        applyMode(msg.mode);
+        log('🔄 ' + (msg.notice || ('已经切换到' + (msg.mode === 'work' ? '工作模式' : '闲聊模式'))), 'log-sys');
+        break;
       case 'user_text':
         log('你：' + msg.text, 'log-user');
         break;
