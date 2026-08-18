@@ -28,6 +28,17 @@ from prompt_loader import build_system_prompt, load_user_profile, get_active_use
 from session_store import SessionStore
 from compaction import CompactionState, COMPACTION_SYSTEM_PROMPT
 from agent_runtime import run_agent_loop
+from agent_state import (
+    LISTENING as ST_LISTENING,
+    THINKING as ST_THINKING,
+    SPEAKING as ST_SPEAKING,
+    IDLE as ST_IDLE,
+    ERROR as ST_ERROR,
+    AgentStateMachine,
+    normalize_state,
+    STATE_CHANGE_EVENT,
+    StateTimeout,
+)
 
 app = FastAPI(title="Ball Ball Pet Voice Pipeline")
 
@@ -94,6 +105,15 @@ SILERO_MODEL_PATH = os.path.join(
     "frontend", "vad", "silero_vad.onnx",
 )
 
+# ── 状态机超时兜底（契约第 5 条）──────────────────
+# 【listening 收音超时】收到 vad_speech_start 后，若长时间没有 vad_speech_end / vad_cancel
+# （前端 VAD 未报结束 / 消息丢失），自动退出收音，避免 is_user_speaking 一直卡 True。
+SPEECH_TIMEOUT_S = 10
+
+# 【speaking 播放超时】进入 speaking 后，若长时间收不到 client_playback_done
+# （前端播放完成事件丢失 / 页面切后台），安全超时兜底复位回 listening，避免状态卡死。
+SPEAKING_PLAYBACK_TIMEOUT_S = 20
+
 # ── 全局组件 ──────────────────────────────────────────
 backend_vad = SileroVAD(SILERO_MODEL_PATH)  # 后端 Silero VAD（业务层二次确认）
 # 通过工厂获取云接口（可插拔：换 ASR/TTS/LLM 只改 .env 的 *_PROVIDER 配置）
@@ -137,12 +157,80 @@ def _is_filler_word(text: str) -> bool:
     return bool(pattern.match(cleaned))
 
 
+async def _sync_backend_state(ws, session, reason="", force=False):
+    """契约第 2 条：把 session.state 归一到规范五态并发布 backend_state_change 通知。
+
+    - 仅作为**通知**，不做强制命令，不假设前端一定收到。
+    - 通过 _last_notified_state 去重：状态未变化则不重复广播。
+    - 设计为与现有 session.state 赋值并联：不阻碍既有控制流转（向后兼容测试看板）。
+    """
+    import time as _t
+    norm = normalize_state(session.state)
+    if not force and session._last_notified_state == norm:
+        return norm
+    session._last_notified_state = norm
+    # 同步到规范化状态机对象的 state（作为规范围/调试记录）
+    session.state_machine.state = norm
+    try:
+        await ws.send_json({
+            "type": STATE_CHANGE_EVENT,
+            "state": norm,
+            "reason": reason or "",
+            "ts": round(_t.time(), 3),
+        })
+        print(f"[状态机] backend_state_change → {norm} ({reason or 'no-reason'})")
+    except Exception:
+        pass
+    return norm
+
+
+async def _auto_exit_speech(ws, session, reason="speech_timeout"):
+    """契约第 5 条·listening 收音超时兜底：
+    vad_speech_start 后 long 时间无 vad_speech_end → 自动退出收音（复位 ASR 与说话状态）。
+    """
+    if not session.is_user_speaking and session.state != "listening":
+        return
+    if not session.is_user_speaking:
+        return
+    print(f"[状态机] 收音超时（{SPEECH_TIMEOUT_S}s 无 speech_end），自动退出收音")
+    try:
+        asr.reset(session.session_id)
+    except Exception:
+        pass
+    session.is_user_speaking = False
+    session.speech_start_ts = None
+    session.speech_timeout.disarm()
+    if session.state not in ("speaking", "pending_play"):
+        session.state = "listening"
+    await _sync_backend_state(ws, session, reason)
+
+
+async def _auto_reset_speaking(ws, session, reason="playback_timeout"):
+    """契约第 5 条·speaking 播放超时兜底：
+    speaking 后 long 时间无 client_playback_done → 安全复位回 listening（防状态卡死）。
+    """
+    if session.state not in ("speaking", "pending_play"):
+        return
+    print(f"[状态机] speaking 播放超时（{SPEAKING_PLAYBACK_TIMEOUT_S}s 无 client_playback_done），安全复位")
+    session.state = "listening"
+    session.speaking_playback_timeout.disarm()
+    if session.tts_task and not session.tts_task.done():
+        try:
+            session.tts_task.cancel()
+        except Exception:
+            pass
+    await _sync_backend_state(ws, session, reason)
 class ConversationSession:
     """单个对话会话的状态机"""
 
     def __init__(self):
         self.session_id = str(uuid.uuid4())[:8]
-        self.state = "listening"  # listening / thinking / speaking
+        self.state = "listening"  # listening / thinking / speaking（内部流转；pending_play 为 speaking 瞬态）
+        # ── 规范化状态机（契约）：对外统一五态 + 状态通知 + 超时兜底 ──
+        self.state_machine = AgentStateMachine(initial="listening")
+        self._last_notified_state = None     # 已发布过的规范态（用于 backend_state_change 去重）
+        self.speech_timeout = StateTimeout(SPEECH_TIMEOUT_S, "speech")
+        self.speaking_playback_timeout = StateTimeout(SPEAKING_PLAYBACK_TIMEOUT_S, "playback")
         self.history = []  # 对话历史（短期记忆，兼容旧路径，新架构以 store 为准）
         self.store = SessionStore()  # 会话层：全量 JSONL 持久化 + run/sub_turn/tool_call_id 可追溯
         self.agent_compaction = CompactionState()  # 会话级压缩检查点（跨 run 保持）
@@ -211,6 +299,8 @@ async def audio_ws(ws: WebSocket):
     await ws.accept()
     session = ConversationSession()
     await ws.send_json({"type": "ready", "session_id": session.session_id})
+    # 契约：连接建立发布初始状态通知（listening）
+    await _sync_backend_state(ws, session, "connected")
 
     try:
         while True:
@@ -511,6 +601,10 @@ async def handle_speech_start(ws: WebSocket, session: ConversationSession, pre_r
             print(f"[状态机] pending_play 打断：已喂入待播缓存音频")
         session.is_user_speaking = True
         session.state = "listening"
+        # 契约：pending_play 被用户打断 → 复位 listening + 通知；启动收音超时兜底
+        session.speaking_playback_timeout.disarm()
+        await _sync_backend_state(ws, session, "interrupted_while_pending_play")
+        session.speech_timeout.arm(lambda: _auto_exit_speech(ws, session))
         session.silence_frames = 0
         session.speech_frames = 0
         session.frames_since_speech = POST_SPEECH_GUARD_FRAMES
@@ -597,6 +691,10 @@ async def handle_speech_start(ws: WebSocket, session: ConversationSession, pre_r
 
         # 5. 进入 listening，重置端点检测，让用户的话能被识别
         session.state = "listening"
+        # 契约：确认真打断 → 复位 listening + 通知；取消播放超时，启动收音超时
+        session.speaking_playback_timeout.disarm()
+        await _sync_backend_state(ws, session, "barge_confirmed")
+        session.speech_timeout.arm(lambda: _auto_exit_speech(ws, session))
         session.is_user_speaking = True
         session.silence_frames = 0
         session.speech_frames = 0
@@ -635,6 +733,8 @@ async def handle_speech_start(ws: WebSocket, session: ConversationSession, pre_r
         # 用户已被前端 VAD 确认真开口 → 立即结束静默保护期，
         # 否则球球说完后用户马上开口，保护期内的实时音频会被跳过吞掉首字
         session.frames_since_speech = POST_SPEECH_GUARD_FRAMES
+        # 契约：listening 收音超时兜底（speech_start 后若无 speech_end，自动退出收音）
+        session.speech_timeout.arm(lambda: _auto_exit_speech(ws, session))
 
 
 async def handle_speech_end(ws: WebSocket, session: ConversationSession):
@@ -650,6 +750,7 @@ async def handle_speech_end(ws: WebSocket, session: ConversationSession):
     if session.is_user_speaking:
         # 用户在说话，现在说完了 → 触发最终识别
         print(f"[状态机] 用户说完，触发 finalize")
+        session.speech_timeout.disarm()  # 收音结束，取消超时兜底
         await finish_user_speech(ws, session)
 
 
@@ -704,6 +805,8 @@ async def handle_user_speech(ws: WebSocket, session: ConversationSession, text: 
 
     session.state = "thinking"
     t0 = time.time()
+    # 契约：进入 thinking（LLM 生成）→ 发布状态通知
+    await _sync_backend_state(ws, session, "llm_generating")
     # 用户说的话已由 asr_final 消息展示（ASR 流式收尾），这里不再发 user_text
     await session.emit_event(ws, "LLM", "开始生成回复", duration=0)
 
@@ -718,6 +821,11 @@ async def handle_user_speech(ws: WebSocket, session: ConversationSession, text: 
     #（state 还是 listening，主循环已把它切到 speaking）→ 不要覆盖回 pending_play
     if session.state != "speaking":
         session.state = "pending_play"
+    # 契约：进入播报阶段（pending_play 归一为 speaking）→ 发布状态通知 + 播放超时兜底
+    await _sync_backend_state(ws, session, "tts_play_started")
+    # 进入 speaking 时取消收音超时（若残留），并 arm 播放完成超时
+    session.speech_timeout.disarm()
+    session.speaking_playback_timeout.arm(lambda: _auto_reset_speaking(ws, session))
     session.reset_speech_guard()
     session.barge_energy_baseline = None
     # 新一轮回复开始，清空「说话期间音频缓存」（上一轮打断/说话残留的）
@@ -907,12 +1015,40 @@ async def handle_control_message(ws: WebSocket, session: ConversationSession, te
 
     msg_type = msg.get("type")
     if msg_type == "stop":
-        # 手动停止（按钮）
+        # 手动停止（按钮）：终止推理/工具/TTS，复位 listening（保持连接，向后兼容测试看板）
         if session.tts_task and not session.tts_task.done():
             session.tts_task.cancel()
         if session.user_speech_task and not session.user_speech_task.done():
             session.user_speech_task.cancel()
         session.state = "listening"
+        session.speech_timeout.disarm()
+        session.speaking_playback_timeout.disarm()
+        await _sync_backend_state(ws, session, "user_stop")
+    elif msg_type == "user_abort":
+        # 契约第 4 条：立即终止 LLM 推理、终止工具调用、取消 TTS、清空 buffer、复位 idle
+        print(f"[状态机] 收到 user_abort，全链路终止 → idle")
+        if session.tts_task and not session.tts_task.done():
+            session.tts_task.cancel()
+        if session.user_speech_task and not session.user_speech_task.done():
+            session.user_speech_task.cancel()
+        try:
+            tts.cancel()
+        except Exception:
+            pass
+        try:
+            asr.reset(session.session_id)
+        except Exception:
+            pass
+        # 清空缓冲
+        session.speaking_audio_cache = bytearray()
+        session.vad_buffer = b""
+        session.is_user_speaking = False
+        session.abort_speaking = True
+        session.speech_timeout.disarm()
+        session.speaking_playback_timeout.disarm()
+        session.state = "idle"
+        await _sync_backend_state(ws, session, "user_abort")
+        await session.emit_event(ws, "系统", "已中止当前对话")
     elif msg_type == "set_mode":
         # 手动切换模式：{"type":"set_mode","mode":"chat"|"work"} 或 "toggle"
         requested = msg.get("mode")
@@ -940,6 +1076,7 @@ async def handle_control_message(ws: WebSocket, session: ConversationSession, te
         asr.reset(session.session_id)
         session.is_user_speaking = False
         session.speech_start_ts = None
+        session.speech_timeout.disarm()  # 误报撤销 → 取消收音超时
         # 通知前端清理流式识别残留行（"你：xxx▌" 没有 asr_final 转正会卡住）
         try:
             await ws.send_json({"type": "asr_cancel"})
@@ -966,12 +1103,19 @@ async def handle_control_message(ws: WebSocket, session: ConversationSession, te
         if session.state == "listening" or session.state == "pending_play":
             session.state = "speaking"
             print("[播放开始] 前端喇叭发声，后端进入 speaking（打断窗口打开）")
+            # 契约：speaking + 通知 + 播放完成超时兜底（防 client_playback_done 丢失）
+            await _sync_backend_state(ws, session, "playback_started")
+            session.speech_timeout.disarm()
+            session.speaking_playback_timeout.arm(lambda: _auto_reset_speaking(ws, session))
     elif msg_type == "client_playback_done":
         # 前端真正播放完，发来此消息 → 后端才进入 listening + 保护期
         # 这是「播放结束」和「TTS发送完」分离的关键
         if session.state in ("speaking", "pending_play"):
             session.state = "listening"
             session.reset_speech_guard()  # 播放真正结束后，才开始保护尾音回声
+            # 契约：speaking → listening + 通知 + 取消播放超时
+            session.speaking_playback_timeout.disarm()
+            await _sync_backend_state(ws, session, "playback_done")
             print("[播放完成] 前端播放完毕，后端进入 listening")
     elif msg_type == "client_barge_in":
         # 前端本地打断：取消 TTS 生成，进入 listening（音频继续流式接收，不丢字）
@@ -1031,6 +1175,11 @@ async def handle_control_message(ws: WebSocket, session: ConversationSession, te
 
         # 进入 listening，但不 reset_episode（保留已喂的 ASR 音频，让用户的话能被识别）
         session.state = "listening"
+        # 契约：打断 → 复位 listening + 通知；取消播放超时，启动收音超时兜底
+        session.speaking_playback_timeout.disarm()
+        await _sync_backend_state(ws, session, "client_barge_in")
+        if session.is_user_speaking:
+            session.speech_timeout.arm(lambda: _auto_exit_speech(ws, session))
         session.barge_energy_baseline = None
         session.barge_consecutive_speech = 0
         session.speaking_start_time = None
@@ -1057,11 +1206,16 @@ async def handle_control_message(ws: WebSocket, session: ConversationSession, te
 
 
 async def cleanup_session(session: ConversationSession):
-    """连接断开时清理"""
+    """连接断开时清理：取消任务、复位状态机超时、清理 ASR。"""
     if session.tts_task and not session.tts_task.done():
         session.tts_task.cancel()
     if session.user_speech_task and not session.user_speech_task.done():
         session.user_speech_task.cancel()
+    try:
+        session.speech_timeout.disarm()
+        session.speaking_playback_timeout.disarm()
+    except Exception:
+        pass
     asr.reset(session.session_id)
 
 
