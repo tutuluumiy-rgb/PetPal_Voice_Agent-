@@ -17,6 +17,14 @@ frontend/vad/*.onnx
 test.mp3
 Untitled
 
+# ── 运行时会话数据（含用户说话内容，绝不提交）──
+backend/sessions/
+backend/sessions_*_tmp/
+
+# ── Electron 构建产物（预留）──
+backend/build/
+backend/dist/
+
 # ── 日志 ──
 *.log
 tmp/

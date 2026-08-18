@@ -24,6 +24,10 @@ from providers.llm import strip_emotion_tags
 from vad_engine import SileroVAD
 from emotion_state import EmotionState
 from mode_state import ModeState, parse_mode_command, build_switch_context
+from prompt_loader import build_system_prompt, load_user_profile, get_active_user_id
+from session_store import SessionStore
+from compaction import CompactionState, COMPACTION_SYSTEM_PROMPT
+from agent_runtime import run_agent_loop
 
 app = FastAPI(title="Ball Ball Pet Voice Pipeline")
 
@@ -109,6 +113,18 @@ FILLER_WORDS = "嗯|啊|哦|额|呃|噢|哎|唉|嗯嗯|啊啊|哦哦|额额|呵�
 
 import re as _re
 
+# 原生工具调用开始时的轻量进度播报（空=不播报；快工具/提问类不播，直接出结果）
+_TOOL_PROGRESS = {
+    "get_weather": "好的，我来查一下天气~",
+    "web_search": "好的，我来搜一下~",
+    "read": "好，我来看一下文件~",
+    "bash": "好的，我来执行一下~",
+    "write": "好的，我来写一下~",
+    "edit": "好的，我来改一下~",
+    "calculator": "",          # 快，不播报
+    "ask_user_questions": "",  # 提问类，不播报
+}
+
 
 def _is_filler_word(text: str) -> bool:
     """判断文本是否只是语气词（如「嗯」「啊」「嗯嗯」等）"""
@@ -127,7 +143,9 @@ class ConversationSession:
     def __init__(self):
         self.session_id = str(uuid.uuid4())[:8]
         self.state = "listening"  # listening / thinking / speaking
-        self.history = []  # 对话历史（短期记忆）
+        self.history = []  # 对话历史（短期记忆，兼容旧路径，新架构以 store 为准）
+        self.store = SessionStore()  # 会话层：全量 JSONL 持久化 + run/sub_turn/tool_call_id 可追溯
+        self.agent_compaction = CompactionState()  # 会话级压缩检查点（跨 run 保持）
         self.silence_frames = 0      # 连续静音帧数（用于终点检测）
         self.speech_frames = 0       # 连续人声帧数（用于最短时长确认）
         self.tts_task = None  # 正在播放的 TTS 任务
@@ -642,21 +660,23 @@ def _build_timing_stats(session, t0, t_llm_first_sentence, t_llm, t_tts):
     - 打断补发：t_tts 传 0（TTS 未完整发送），数据是部分值，但仍计入平均
     """
     tts_first = getattr(tts, "first_audio_time", None)  # TTS首包（第一句合成首包）
+    # llm.first_token_time 在新架构下可能为 None（属性存在但未设置），必须兜底
+    llm_first_token = getattr(llm, "first_token_time", None) or 0
     # 端到端首响 = ASR + LLM首字 + LLM生成第一句 + TTS首包
     # t_llm_first_sentence 是「LLM开始到第一句生成完」的时间，包含首字+生成第一句
     e2e = round(
-        getattr(session, "last_asr_time", 0)
-        + (t_llm_first_sentence if t_llm_first_sentence else getattr(llm, "first_token_time", 0))
-        + (tts_first if tts_first else 0),
+        (getattr(session, "last_asr_time", 0) or 0)
+        + (t_llm_first_sentence if t_llm_first_sentence else llm_first_token)
+        + (tts_first or 0),
         2,
     )
     current = {
-        "asr": getattr(session, "last_asr_time", 0),
-        "llm_first_token": getattr(llm, "first_token_time", 0),
+        "asr": getattr(session, "last_asr_time", 0) or 0,
+        "llm_first_token": llm_first_token,
         "llm_first_sentence": round(t_llm_first_sentence or 0, 2),  # 新增：LLM首句
-        "tts_first_packet": tts_first if tts_first else 0,
+        "tts_first_packet": tts_first or 0,
         "e2e": e2e,
-        "total": round(getattr(session, "last_asr_time", 0) + t_llm + t_tts, 2),
+        "total": round((getattr(session, "last_asr_time", 0) or 0) + t_llm + t_tts, 2),
     }
     session.timing_count += 1
     avg = {}
@@ -714,38 +734,62 @@ async def handle_user_speech(ws: WebSocket, session: ConversationSession, text: 
     # ── 架构修复：整条流水线包 try/except/finally ──
     # 任务化后，打断时主循环会 cancel 本任务。这里捕获 CancelledError 做清理
     # （停掉当前句 TTS，防后台线程继续发音频），并重新抛出传播取消状态。
-    progress_task = None  # 工具执行前的进度播报任务（与工具执行并行，正式回复前等播完）
+    # ── 会话层：本 run 生成 run_id + 记录用户输入（可追溯）──
+    import uuid as _uuid
+    run_id = _uuid.uuid4().hex[:8]
+    mode = mode_state.get_mode()
+    system_prompt = build_system_prompt(mode)
+    if extra_context:
+        system_prompt += "\n\n" + extra_context
+    session.store.add("user", text, run_id=run_id, sub_turn=1)
 
-    async def _on_progress(progress_text: str):
-        """工具执行前的进度播报：事件流 + TTS 播报（不 await，与工具执行并行）"""
+    progress_task = None  # 工具开始前的进度播报任务
+
+    async def _on_tool(name, call_id, args):
+        """原生工具调用开始：事件 + 长工具轻量 TTS 进度播报。"""
         nonlocal progress_task
-        # 剥离进度文本里残留的情绪标签（完整 [开心] 或残缺 委屈]/[难过），避免 TTS 读出
-        progress_text = strip_emotion_tags(progress_text)
-        await session.emit_event(ws, "工具", f"执行中：{progress_text}")
-        progress_task = asyncio.create_task(
-            tts.speak_and_send(ws, progress_text, session.session_id, {"emotion": "平静"})
+        await session.emit_event(ws, "工具", f"执行中：{name}")
+        progress_text = _TOOL_PROGRESS.get(name)
+        if progress_text:
+            progress_task = asyncio.create_task(
+                tts.speak_and_send(ws, progress_text, session.session_id, {"emotion": "平静"})
+            )
+
+    async def _summarize(prompt_text: str) -> str:
+        """独立无工具模型调用，生成/更新压缩检查点（超长对话才触发）。"""
+        resp = await llm.client.chat.completions.create(
+            model=llm.model,
+            messages=[
+                {"role": "system", "content": COMPACTION_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt_text},
+            ],
+            max_tokens=800,
+            stream=False,
         )
+        return resp.choices[0].message.content or ""
 
     try:
-        # 方案 A：LLM 工具自路由（无显式模式/路由层）——
-        # LLM 自己决定调不调工具、调几轮；yield ("progress", 文本) 或 ("reply", 句子, 情绪)
-        async for item in llm.agent_chat(
-            text, session.history,
-            on_progress=_on_progress,
-            is_cancelled=lambda: session.abort_speaking,
-            extra_context=extra_context,
+        # 新架构：原生 function calling 多 sub_turn agent 环（会话层/上下文层/压缩/工具并发都在环内）
+        async for ev in run_agent_loop(
+            llm.client, llm.model, mode, system_prompt, session.store,
+            run_id=run_id,
+            user_profile=load_user_profile(get_active_user_id()),
+            compaction_state=session.agent_compaction,
+            summarizer=_summarize,
+            on_tool=_on_tool,
         ):
             # 被打断：停止后续句子的生成和播放
             if session.abort_speaking:
                 print(f"[打断DEBUG] 循环检测到 abort_speaking，退出流水线")
                 break
 
-            kind = item[0]
-            if kind == "progress":
-                # 进度播报已由 on_progress 触发 TTS（与工具执行并行），这里只需等待正式回复
+            kind = ev[0]
+            if kind == "tool":
+                continue  # 工具进度已由 on_tool 处理
+            if kind != "reply":
                 continue
 
-            sentence, emo = item[1], item[2]
+            sentence, emo = ev[1], ev[2]
 
             if full_reply == "":
                 # 第一条正式回复：立即停止进度播报，直接转最终回复（不等进度播完）
@@ -812,9 +856,10 @@ async def handle_user_speech(ws: WebSocket, session: ConversationSession, text: 
     t_llm = time.time() - t0
     t_tts = time.time() - t_tts_start
 
-    # 记录对话历史
+    # 记录对话历史（旧路径兼容）+ 会话层持久化（新架构：完整可追溯）
     session.history.append({"role": "user", "content": text})
     session.history.append({"role": "assistant", "content": full_reply})
+    session.store.add("assistant", full_reply, run_id=run_id)
 
     await session.emit_event(
         ws, "LLM",
@@ -822,26 +867,29 @@ async def handle_user_speech(ws: WebSocket, session: ConversationSession, text: 
         duration=round(t_llm, 2),
     )
 
-    # ── 统计本轮耗时，发送看板数据 ──
-    current, avg = _build_timing_stats(session, t0, t_llm_first_sentence, t_llm, t_tts)
-    # 修复：打断时任务取消被内层 except CancelledError 消费，break 后走正常收尾路径。
-    # 这里通过 abort_speaking 标记「该轮被打断」，让看板能区分打断轮（部分数据）与完整轮。
-    if session.abort_speaking:
-        current["interrupted"] = True
-        print(f"[流水线] 该轮被打断，timing 标记 interrupted=True")
-
-    # 发「回复结束」信号，前端据此标记 ballIsPlaying=false
-    await ws.send_json({"type": "reply_end"})
-
+    # ── 统计本轮耗时 + 发 reply_end / timing（健壮化：任何统计或发送失败，
+    #    reply_end 也必须发出，否则前端 ballIsPlaying 状态卡死）──
     try:
+        current, avg = _build_timing_stats(session, t0, t_llm_first_sentence, t_llm, t_tts)
+        # 修复：打断时任务取消被内层 except CancelledError 消费，break 后走正常收尾路径。
+        # 这里通过 abort_speaking 标记「该轮被打断」，让看板能区分打断轮（部分数据）与完整轮。
+        if session.abort_speaking:
+            current["interrupted"] = True
+            print(f"[流水线] 该轮被打断，timing 标记 interrupted=True")
+        await ws.send_json({"type": "reply_end"})
         await ws.send_json({
             "type": "timing",
             "current": current,
             "avg": avg,
             "count": session.timing_count,
         })
-    except Exception:
-        pass
+    except Exception as _e:
+        # 收尾异常不应影响前端状态：诊断打印 + 尽力补发 reply_end
+        print(f"[流水线] 收尾统计/发送异常: {type(_e).__name__}: {_e}", file=__import__("sys").stderr)
+        try:
+            await ws.send_json({"type": "reply_end"})
+        except Exception:
+            pass
 
     # 关键修复：TTS 发送完 ≠ 前端播放完。
     # 这里【不】立即进入 listening，而是保持 speaking 状态，

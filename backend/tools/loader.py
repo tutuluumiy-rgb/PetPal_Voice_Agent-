@@ -104,9 +104,14 @@ from .ask_user_questions import TOOL_SPEC as _ASK_SPEC
 _HARNESS_SPECS = [_READ_SPEC, _BASH_SPEC, _WRITE_SPEC, _EDIT_SPEC, _ASK_SPEC]
 
 for _spec in _HARNESS_SPECS:
+    # 工具文件里的 definition（如 READ_TOOL）本身是 {"type":"function","function":{name..}}
+    # 取其中的 name 层作为 function 字段，避免外层再包一层导致缺 name
+    _fn = _spec.definition
+    if isinstance(_fn, dict) and isinstance(_fn.get("function"), dict):
+        _fn = _fn["function"]
     TOOL_DEFINITIONS[_spec.name] = {
         "type": "function",
-        "function": _spec.definition,
+        "function": _fn or _spec.definition,
         "executor": _spec.implementation,
         # 记录审批声明，供 execute_tool 展示/授权（语⾳全自动时仅元数据）
         "approval": getattr(_spec, "approval_mode", "REQUIRE_APPROVAL"),
@@ -137,6 +142,32 @@ def get_schema(name: str) -> dict:
     """单个工具的 OpenAI schema（type/name/description/parameters）"""
     defn = TOOL_DEFINITIONS.get(name)
     return defn["function"] if defn else None
+
+
+def build_tools_list(mode: str | None = None) -> list:
+    """按模式构建传给 LLM 的 API tools 参数（OpenAI function calling 格式）。
+
+    只包含该模式白名单内的工具。这是原生 function calling 的 tools 列表来源。
+    """
+    tools = []
+    for name in get_tool_names(mode):
+        defn = TOOL_DEFINITIONS.get(name)
+        if defn and defn.get("function"):
+            tools.append({"type": "function", "function": defn["function"]})
+    return tools
+
+
+def get_execution_mode(name: str) -> str:
+    """工具执行并发模式：SEQUENTIAL（副作用/串行）或 PARALLEL_READONLY（只读/并行）。
+
+    Harness 工具自带 execution_mode；基础只读工具默认 PARALLEL_READONLY。
+    """
+    defn = TOOL_DEFINITIONS.get(name, {})
+    mode = defn.get("execution_mode")
+    if mode:
+        return mode
+    return "PARALLEL_READONLY"
+
 
 
 def is_tool_allowed(name: str, mode: str | None) -> bool:
