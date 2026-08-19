@@ -845,7 +845,7 @@ renderBargeAvg();
 // 播放控制权在前端：什么时候播/播哪条/重复几次由前端自判。
 // 后端只负责「停止播报」事件通知（stop_placeholder / reply / tts_start…），前端据此立即切断占位。
 // 用独立 Audio 通道，与后端流式 PCM 播放器(pcmPlayback)完全隔离，不混音。
-// 资源：frontend/audio/placeholders/*.wav（由 backend/scripts/gen_placeholders.py 预合成）
+// 资源：audio/placeholders/*.wav（本目录下，由 backend/scripts/gen_placeholders.py 预合成）
 const PLACEHOLDER_AUDIO = {
   wait_processing: './audio/placeholders/wait_processing.wav',
   wait_working:    './audio/placeholders/wait_working.wav',

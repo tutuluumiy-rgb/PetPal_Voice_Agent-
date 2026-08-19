@@ -80,7 +80,7 @@ async def main():
     from providers.tts import AliyunTTS
 
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    vad = SileroVAD(os.path.join(root, "frontend", "vad", "silero_vad.onnx"))
+    vad = SileroVAD(os.path.join(root, "testboard", "vad", "silero_vad.onnx"))
     tts = AliyunTTS()
 
     chunks = []

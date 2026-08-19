@@ -10,8 +10,8 @@ __pycache__/
 
 # ── 模型文件（体积大，可重新下载）──
 backend/models/
-frontend/vad/*.wasm
-frontend/vad/*.onnx
+testboard/vad/*.wasm
+testboard/vad/*.onnx
 
 # ── 临时文件 ──
 test.mp3

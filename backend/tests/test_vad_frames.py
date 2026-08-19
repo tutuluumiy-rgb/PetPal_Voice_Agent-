@@ -50,7 +50,7 @@ async def main():
 
     from providers.tts import AliyunTTS
 
-    vad = SileroVAD(r"../frontend/vad/silero_vad.onnx")
+    vad = SileroVAD(r"../testboard/vad/silero_vad.onnx")
     tts = AliyunTTS()
 
     chunks = []

@@ -1,7 +1,7 @@
 # 占位音频 + 唤醒词（KWS）方案
 
 > 记录占位音频（Placeholder）设计与唤醒词（KWS）方案，供前端 Agent 开发 Electron 与后续扩展参考。
-> 相关资源：`frontend/audio/placeholders/*.wav`（占位音频）；生成脚本 `backend/scripts/gen_placeholders.py`。
+> 相关资源：`testboard/audio/placeholders/*.wav`（占位音频，测试看板下）；生成脚本 `backend/scripts/gen_placeholders.py`。
 
 ---
 
@@ -9,7 +9,7 @@
 
 ### 1.1 架构原则（前后端解耦）
 
-- **占位音频放前端**：资源在 `frontend/audio/placeholders/`，由前端本地播放。
+- **占位音频放前端**：资源在 `testboard/audio/placeholders/`（测试看板，Electron 阶段可整体挪到 frontend/），由前端本地播放。
 - **播放控制权在前端**：什么时候播、播哪条、重复几次，均由前端自判（前端自维护计时器与状态）。
 - **后端只发「停止播报」事件**：后端一旦开始下发正式回复，发 `stop_placeholder` 事件；前端收到即切断占位并清计时器。
 - **独立音频通道**：占位用独立 `Audio` 对象播放，与后端流式 PCM 播放器（`pcmPlayback`）**完全隔离**，不混音、不共享状态。
@@ -46,7 +46,7 @@
 ### 1.4 生成脚本
 
 `backend/scripts/gen_placeholders.py`：用现有 TTS（`providers.get_tts`）把文案合成一次，
-写成 24kHz mono 16bit WAV（纯 Python 加 RIFF 头，无第三方依赖）到 `frontend/audio/placeholders/`。
+写成 24kHz mono 16bit WAV（纯 Python 加 RIFF 头，无第三方依赖）到 `testboard/audio/placeholders/`。
 
 ```powershell
 cd backend

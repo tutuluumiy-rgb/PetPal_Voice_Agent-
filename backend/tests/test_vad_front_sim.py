@@ -147,9 +147,9 @@ def sim_frontend_vad(vad: FrontVadSim, audio: bytes):
 async def main():
     from providers.tts import AliyunTTS
 
-    # 模型路径：项目根/frontend/vad/silero_vad.onnx（脚本在 backend/tests/，上三级是项目根）
+    # 模型路径：项目根/testboard/vad/silero_vad.onnx（脚本在 backend/tests/，上三级是项目根）
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    vad = FrontVadSim(os.path.join(root, "frontend", "vad", "silero_vad.onnx"))
+    vad = FrontVadSim(os.path.join(root, "testboard", "vad", "silero_vad.onnx"))
     tts = AliyunTTS()
 
     # 合成真人声样本（TTS 模拟说话）

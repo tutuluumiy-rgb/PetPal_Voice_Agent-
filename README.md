@@ -40,14 +40,17 @@ backend/            FastAPI 后端（WebSocket 音频流 + 编排）
   session_store.py  会话层（全量 JSONL 持久化）
   tools/            工具集（搜索/读取/计算/天气/文件/提问）
   MESSAGE_CONTRACT.md  前后端消息契约（供前端 Agent 开发 Electron）
-frontend/           测试看板（8001 后端 + 8080 静态服务）
+testboard/           测试看板（8001 后端 + 8080 静态服务）
   index.html        语音管道测试看板（AEC→VAD→ASR→LLM→TTS）
   vad/              Silero VAD / onnxruntime 本地资源
+  audio/            预生成占位音频（placeholders/*.wav）
 fix_port.py         一键清理占用 8001 的残留进程
 ```
 
-> 前端目录当前为**测试看板**；最终产品前端为 **Electron 桌面应用**，由另一套前端 Agent
-> 依据 `backend/MESSAGE_CONTRACT.md` 另行开发。
+> **目录命名约定**：`testboard/` 是**测试看板**（浏览器 demo，用于验证语音管道）；
+> `frontend/` 目录**已预留给最终 Electron 桌面应用**（由另一套前端 Agent
+> 依据 `backend/MESSAGE_CONTRACT.md` 开发，将占用 `frontend/` 命名）。
+> 后端 VAD 模型路径已指向 `testboard/vad/` 下。
 
 ## 快速启动
 
@@ -57,7 +60,7 @@ cd backend
 python main.py            # 监听 0.0.0.0:8001
 
 # ② 启动测试看板（可选，另一终端）
-cd frontend
+cd testboard
 python -m http.server 8080
 
 # 浏览器打开 http://127.0.0.1:8080/

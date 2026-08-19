@@ -99,10 +99,10 @@ CONFIRM_WINDOW_MS = 512
 # 调大 → 更严格（只认明显能量突变）；调小 → 更宽松（弱插话也能打断）
 CONFIRM_ENERGY_JUMP = 3.0
 
-# 【Silero 模型路径】后端 VAD 模型（复用前端下载的）
+# 【Silero 模型路径】后端 VAD 模型（复用测试看板下载的）
 SILERO_MODEL_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "frontend", "vad", "silero_vad.onnx",
+    "testboard", "vad", "silero_vad.onnx",
 )
 
 # ── 状态机超时兜底（契约第 5 条）──────────────────
