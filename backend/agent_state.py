@@ -166,18 +166,26 @@ class StateTimeout:
         self._handle = loop.call_later(self.seconds, self._fire_sync, callback)
 
     def _fire_sync(self, callback):
-        # call_later 的同步回调入口：把 async 回调交给事件循环执行
+        # call_later 的同步回调入口：把 async 回调/返回协程的调用交给事件循环执行
         self._handle = None
-        if asyncio.iscoroutinefunction(callback):
-            try:
-                asyncio.ensure_future(self._fire(callback))
-            except RuntimeError:
-                pass  # 事件循环未运行等异常，静默忽略（兜底不应抛到外部）
-        else:
-            try:
-                callback()
-            except Exception as e:
-                print(f"[state-timeout] {self.label} 回调异常: {e}")
+        try:
+            result = callback()
+            # 无论回调用 coroutine function 还是普通函数返回协程，
+            # 统一在事件循环里调度它，避免「coroutine was never awaited」
+            if asyncio.iscoroutine(result):
+                asyncio.ensure_future(self._fire_await(result))
+        except RuntimeError:
+            pass  # 事件循环未运行等异常，静默忽略（兜底不应抛到外部）
+        except Exception as e:
+            print(f"[state-timeout] {self.label} 回调异常: {e}")
+
+    async def _fire_await(self, coro):
+        try:
+            await coro
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            print(f"[state-timeout] {self.label} 回调异常: {e}")
 
     async def _fire(self, callback):
         try:

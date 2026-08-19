@@ -454,6 +454,8 @@ async function start() {
         if (processor) { processor.disconnect(); }
         if (stream) { stream.getTracks().forEach(t => t.stop()); }
         log('连接断开', 'log-sys');
+        // 占位：连接意外断开 → 播「连接中断」提醒
+        playPlaceholder('conn_lost');
       }
     };
     // 等待连接成功；失败时 reject，避免 start() 永远卡在 onopen（原来无 onerror 处理）
@@ -531,6 +533,7 @@ async function stop() {
   isRunning = false;
   btnEl.textContent = '开始对话';
   setStatus('已停止', '');
+  stopPlaceholder();  // 主动停止：清占位与等待计时
   if (frontendVad) { try { frontendVad.destroy(); } catch (e) {} frontendVad = null; }
   if (processor) { processor.disconnect(); source.disconnect(); }
   if (stream) { stream.getTracks().forEach(t => t.stop()); }
@@ -541,6 +544,12 @@ async function stop() {
 function onMessage(event) {
   if (typeof event.data === 'string') {
     const msg = JSON.parse(event.data);
+    // 占位：一旦后端开始下发「新音频/回复/确认」类消息，立即切断占位并清等待计时
+    if (['reply_start', 'reply', 'reply_append', 'tts_start', 'barge_confirm',
+         'barge_reject', 'stop_playback', 'resume_playback', 'stop_placeholder',
+         'asr_final', 'reply_end'].includes(msg.type)) {
+      stopPlaceholder();
+    }
     switch (msg.type) {
       case 'mode_changed':
         // 双模式切换（语音指令或手动）→ 更新按钮 + 文字系统通知（不播报）
@@ -832,6 +841,70 @@ function renderBargeAvg() {
 // 页面加载后立即渲染一次（脚本在 body 末尾，DOM 已就绪，直接调用）
 renderBargeAvg();
 
+// ── 占位音频管理器（PlaceholderPlayer）──────────────────
+// 播放控制权在前端：什么时候播/播哪条/重复几次由前端自判。
+// 后端只负责「停止播报」事件通知（stop_placeholder / reply / tts_start…），前端据此立即切断占位。
+// 用独立 Audio 通道，与后端流式 PCM 播放器(pcmPlayback)完全隔离，不混音。
+// 资源：frontend/audio/placeholders/*.wav（由 backend/scripts/gen_placeholders.py 预合成）
+const PLACEHOLDER_AUDIO = {
+  wait_processing: './audio/placeholders/wait_processing.wav',
+  wait_working:    './audio/placeholders/wait_working.wav',
+  wait_almost:     './audio/placeholders/wait_almost.wav',
+  tool_start:      './audio/placeholders/tool_start.wav',
+  task_failed:     './audio/placeholders/task_failed.wav',
+  task_retry:      './audio/placeholders/task_retry.wav',
+  conn_lost:       './audio/placeholders/conn_lost.wav',
+  conn_timeout:    './audio/placeholders/conn_timeout.wav',
+  wake_here:       './audio/placeholders/wake_here.wav',
+  wake_yes:        './audio/placeholders/wake_yes.wav',
+};
+// 等待回复占位参数：第一次等多久才播、重复间隔、最多播几次
+const WAIT_PLACEHOLDER_DELAY_MS = 6000;   // 等 6s 未收到回复 → 播「正在处理」
+const WAIT_PLACEHOLDER_REPEAT_MS = 9000;  // 之后每 9s 播下一条
+const WAIT_PLACEHOLDER_MAX = 3;           // 最多播 3 次
+
+let placeholderAudio = null;   // 当前占位 Audio 实例
+let waitTimer = null;          // 等待占位定时器
+let waitRepeatCount = 0;
+let waitingForReply = false;   // 是否在「等回复」窗口（用于占位触发）
+
+// 播放一条占位音频（独立通道，覆盖当前占位）
+function playPlaceholder(key) {
+  const url = PLACEHOLDER_AUDIO[key];
+  if (!url) return;
+  try {
+    if (placeholderAudio) { try { placeholderAudio.pause(); } catch (e) {} placeholderAudio = null; }
+    const a = new Audio(url);
+    placeholderAudio = a;
+    a.play().catch(() => {});
+    a.onended = () => { if (placeholderAudio === a) placeholderAudio = null; };
+    log('【占位】' + key, 'log-sys');
+  } catch (e) {}
+}
+
+// 立即切断占位并清计时器（后端新音频进来 / 停止信号）
+function stopPlaceholder() {
+  clearTimeout(waitTimer); waitTimer = null;
+  waitRepeatCount = 0; waitingForReply = false;
+  if (placeholderAudio) { try { placeholderAudio.pause(); } catch (e) {} placeholderAudio = null; }
+}
+
+// 用户说完、进入等待：超时后播等待占位（可重复）
+function startWaitPlaceholder() {
+  waitingForReply = true; waitRepeatCount = 0;
+  clearTimeout(waitTimer);
+  const seq = ['wait_processing', 'wait_working', 'wait_almost'];
+  const tick = () => {
+    if (!waitingForReply) return;
+    playPlaceholder(seq[Math.min(waitRepeatCount, seq.length - 1)]);
+    waitRepeatCount++;
+    if (waitRepeatCount < WAIT_PLACEHOLDER_MAX) {
+      waitTimer = setTimeout(tick, WAIT_PLACEHOLDER_REPEAT_MS);
+    }
+  };
+  waitTimer = setTimeout(tick, WAIT_PLACEHOLDER_DELAY_MS);
+}
+
 // ── 流式 PCM 播放器（时间线调度版）──────────────────
 let pcmPlayback = null;
 
@@ -1043,6 +1116,8 @@ async function initFrontendVad() {
         if (ws && ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: 'speech_end' }));
         }
+        // 占位：用户说完进入等待，超时未收到回复则播「正在处理」提醒
+        startWaitPlaceholder();
       },
       onVADMisfire: () => {
         console.log('[VAD] onVADMisfire（误报，延迟恢复音量）');

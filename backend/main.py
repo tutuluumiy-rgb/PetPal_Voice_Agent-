@@ -108,7 +108,8 @@ SILERO_MODEL_PATH = os.path.join(
 # ── 状态机超时兜底（契约第 5 条）──────────────────
 # 【listening 收音超时】收到 vad_speech_start 后，若长时间没有 vad_speech_end / vad_cancel
 # （前端 VAD 未报结束 / 消息丢失），自动退出收音，避免 is_user_speaking 一直卡 True。
-SPEECH_TIMEOUT_S = 10
+# 30s：给长话让路；且 _auto_exit_speech 会“仍在收音频则续期”（长话保护），实际更宽松。
+SPEECH_TIMEOUT_S = 30
 
 # 【speaking 播放超时】进入 speaking 后，若长时间收不到 client_playback_done
 # （前端播放完成事件丢失 / 页面切后台），安全超时兜底复位回 listening，避免状态卡死。
@@ -187,11 +188,24 @@ async def _sync_backend_state(ws, session, reason="", force=False):
 async def _auto_exit_speech(ws, session, reason="speech_timeout"):
     """契约第 5 条·listening 收音超时兜底：
     vad_speech_start 后 long 时间无 vad_speech_end → 自动退出收音（复位 ASR 与说话状态）。
+
+    防误伤长话：若前端仍在持续上传音频（用户还在说话），则续期重 arm 一次（有上限），
+    而非强行重置 ASR —— 否则一句 >SPEECH_TIMEOUT_S 的长话会被中途切断、后半句丢失。
     """
+    import time as _t
     if not session.is_user_speaking and session.state != "listening":
         return
     if not session.is_user_speaking:
         return
+
+    # 仍在收音频（<1.5s 内还有音频到达）→ 用户还在讲 → 续期，不误伤长话
+    if session.last_audio_recv_ts and (_t.time() - session.last_audio_recv_ts < 1.5):
+        if session.speech_timeout_grace < 2:  # 最多续 2 次（总约 3×SPEECH_TIMEOUT_S）
+            session.speech_timeout_grace += 1
+            print(f"[状态机] 仍在收音频，收音超时续期 # {session.speech_timeout_grace}（长话保护）")
+            session.speech_timeout.arm(lambda: _auto_exit_speech(ws, session))
+            return
+
     print(f"[状态机] 收音超时（{SPEECH_TIMEOUT_S}s 无 speech_end），自动退出收音")
     try:
         asr.reset(session.session_id)
@@ -199,6 +213,7 @@ async def _auto_exit_speech(ws, session, reason="speech_timeout"):
         pass
     session.is_user_speaking = False
     session.speech_start_ts = None
+    session.speech_timeout_grace = 0
     session.speech_timeout.disarm()
     if session.state not in ("speaking", "pending_play"):
         session.state = "listening"
@@ -244,6 +259,8 @@ class ConversationSession:
         self.speech_start_ts = None  # 最近一次 speech_start 到达时刻（用于会话过期兜底）
         self.frames_since_speech = 0  # 球球说话后的静默保护计数（从0递增）
         self.is_user_speaking = False  # 当前是否已确认用户正在说话
+        self.last_audio_recv_ts = 0.0  # 最近一次收到前端音频的时间戳（用于收音超时“仍在说话则续期”）
+        self.speech_timeout_grace = 0  # 收音超时续期次数（避免无限续）
         self.is_barge_in_speaking = False  # 打断场景：是否已确认用户在插话
         self.barge_energy_baseline = None  # 球球说话时的回声能量基线（用于能量尖峰检测）
         self.barge_consecutive_speech = 0  # 打断场景：连续人声帧数（能量触发后的二次确认）
@@ -329,6 +346,9 @@ async def handle_audio_frame(ws: WebSocket, session: ConversationSession, pcm: b
     1. speaking/thinking 期间：缓存音频（打断时回放，防窗口吞字）
     2. listening 且 is_user_speaking：喂给 ASR 实时识别
     """
+    import time as _t
+    session.last_audio_recv_ts = _t.time()  # 记录音频到达时刻（收音超时“仍在说话则续期”依据）
+
     if session.state in ("speaking", "thinking", "pending_play"):
         # 球球说话/思考/待播期间：缓存音频（打断信号到达后回放给 ASR）
         session.speaking_audio_cache.extend(pcm)
@@ -834,6 +854,12 @@ async def handle_user_speech(ws: WebSocket, session: ConversationSession, text: 
     session.speaking_start_time = time.time()
     session.abort_speaking = False  # 新一轮说话，清空打断标志
 
+    # 契约：正式开始下发回复前，通知前端切断占位音频（前端控制播放权，后端只发停止通知）
+    try:
+        await ws.send_json({"type": "stop_placeholder"})
+    except Exception:
+        pass
+
     # 发「回复开始」信号，前端据此标记 ballIsPlaying=true
     await ws.send_json({"type": "reply_start"})
 
@@ -852,13 +878,20 @@ async def handle_user_speech(ws: WebSocket, session: ConversationSession, text: 
     session.store.add("user", text, run_id=run_id, sub_turn=1)
 
     progress_task = None  # 工具开始前的进度播报任务
+    progress_announced = False  # 整个 run 内是否已播过一次进度占位（多工具/多 sub_turn 只播一次）
 
-    async def _on_tool(name, call_id, args):
-        """原生工具调用开始：事件 + 长工具轻量 TTS 进度播报。"""
-        nonlocal progress_task
+    async def _on_tool(stage, name, call_id, args):
+        """原生工具调用开始（agent_runtime 以 4 参调用：stage, name, call_id, args）。
+        stage: "start"（工具开始执行）。事件 + 长工具轻量 TTS 进度播报。
+
+        去抖：**整个 run 内进度占位只播一次**。并行多工具（如"同时搜两个"）或
+        多 sub_turn 依次调工具，都只播第一句占位，避免连续播两遍。
+        """
+        nonlocal progress_task, progress_announced
         await session.emit_event(ws, "工具", f"执行中：{name}")
         progress_text = _TOOL_PROGRESS.get(name)
-        if progress_text:
+        if progress_text and not progress_announced:
+            progress_announced = True
             progress_task = asyncio.create_task(
                 tts.speak_and_send(ws, progress_text, session.session_id, {"emotion": "平静"})
             )
