@@ -60,35 +60,52 @@ python scripts/gen_placeholders.py task_failed # 只合成某条
 
 ## 二、唤醒词（KWS）—— Electron 阶段方案
 
-### 2.1 唤醒词（已定）
+### 2.1 唤醒词（已定 + 本次修正）
 
-- **主唤醒词：「宠伴」**（对应 PetPal Voice Agent「宠伴」；2 字、辨识度高、KWS 模型友好、不易与环境音误触发）。
-- **备选别名：「球球」**（人设曾用名；但"球球"与 ASR 拟声词接近、易误触发，故作文案/别名而非主唤醒）。
+- **陷阱（重要）**：专用 KWS 模型**只能识别训练时预置的关键词**，不能随意换成任意词；
+  原定「宠伴 / 球球 / 你好小伴」都不在预训练 KWS 词表里 → **改用模型现成词**。
+- **本次处理**：用 `download_kws.py` 下载模型并打印其关键词表，挑一个中文词作唤醒词
+  （默认示例 **「你好小米」**）；展示文本在 `ContextCard.vue` 的 `wakeKeyword`，实际识别词由模型决定。
+- **若未来坚持自定义词**：改用「流式中文 ASR（zipformer-zh）常驻转写 + 文本匹配」路线，
+  任意词可用（较 KWS 略重）。
 
-### 2.2 路线确认：Electron 常驻 CPU KWS
+### 2.2 路线确认（最终落地）：Electron **主进程** + `sherpa-onnx-node`
 
-- **纠正认知**：KWS 用**轻量小模型跑 CPU** 即可（流式推理 <50ms、功耗低，适合 7×24 待机监听）；
-  **GPU 应留给完整大 ASR / LLM，不是 KWS 的必需**。若坚持 GPU 跑 KWS，仅适合超大/多唤醒词或极低延迟极端场景，一般用不上。
-- **选型推荐**：**sherpa-onnx 流式 KWS**
-  （KWS + 整句 ASR 同引擎、MIT、可自定义中文词表/发音字典、CPU 推理快）；
-  备选 Picovoice Porcupine（需付费授权）、Vosk（KWS demo，略旧）。
+- **WHY**：官方 JS/Electron 生态用 **Node 绑定 `sherpa-onnx-node`**（npm 确定存在，官方示例就是 `npm install sherpa-onnx-node`）；
+  浏览器 wasm 版缺**轻量独立**运行时发布、`sherpa-onnx-wasm` 又非 npm 包，故弃 wasm、走主进程原生绑定。
+- **架构**：
+  ```
+  渲染进程（采集，getUserMedia）─ IPC kws:feed(16k Float32) → 主进程
+    主进程：sherpa-onnx-node（OnlineRecognizer + KWS 模型）流式推理
+    主进程 ← 命中唤醒词 → IPC kws:wake 广播回渲染进程 → 进入对话（连后端 8001 + VAD）
+  ```
+- **落地文件**：
+  - `frontend/scripts/download_kws.py`：下载 KWS 模型（官方 `kws-models` release URL，
+    解压 encoder/decoder/joiner.onnx + tokens + keywords，打印关键词表）到 `frontend/resources/kws/` 或 `renderer/public/kws/`。
+  - `frontend/main/kws.ts`：主进程 KWS（懒加载 `sherpa-onnx-node`，注册 `kws:feed`/`kws:wake` IPC）。
+  - `frontend/main/index.ts`：app ready 时 `setupKws()`。
+  - `frontend/preload/types.ts|index.ts`：新增 `kwsFeed` / `onKwsWake` 通道。
+  - `frontend/renderer/app/voice/VoicePipeline.ts`：待机帧走 `window.api.kwsFeed`，监听 `onKwsWake` 进对话。
 
-### 2.3 Electron 主进程架构
+### 2.3 依赖与验证点（重要）
 
-```
-Electron 主进程
-  ├─ 持续麦克风采集（CPU 低占用）
-  ├─ KWS 待机：仅跑轻量唤醒模型（<50ms/次），不唤醒不启动大模型
-  ├─ 命中「宠伴」→ 触发唤醒
-  │     └─ 播「我在呢～」（占位 wake_here）→ 启动完整 ASR 链路（此时才可选 GPU 大 ASR）
-  └─ 待机/唤醒两档资源策略：唤醒后提升采样率 / 模型档位
-```
+- **依赖**：`cd frontend && npm i sherpa-onnx-node`（官方 npm 包）。
+  - Electron 报**原生模块 ABI 不匹配**时：`npx @electron/rebuild -f -w sherpa-onnx-node`。
+- **模型**：`cd frontend && python scripts/download_kws.py`（需联网；官方 `kws-models` release
+  `sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01`），并打印关键词表挑词。
+- **验证点**（本 agent 沙箱**无法联网/无法跑 Electron**，需用户本机验证）：
+  1. 下载脚本能拉到模型并打印关键词表；
+  2. `npm i sherpa-onnx-node` 成功、主进程 `[kws]` 日志出现「唤醒词已就绪」；
+  3. 喊唤醒词 → 进对话、说完回待机。起不来看主进程 `[kws]` 日志（缺库/缺模型/ABI 不匹配都有明确提示）。
 
-### 2.4 Web 阶段过渡
+### 2.4 交互（已定）
 
-- 浏览器无法可靠 7×24 常驻麦克风（后台标签节流、麦克风占用、autoplay 限制），
-  故**web 测试看板本期不做常驻 KWS**；用「点击 / 按住说话(PTT)」过渡。
-- KWS 代码留待 Electron 阶段，按本文档 2.2/2.3 落地；唤醒响应音频已预生成（`wake_here`/`wake_yes`）。
+- **待机听唤醒，喊词才进对话，说完回待机**：
+  - 启动即 `start({ wakeWord: true })` → `idle` 待机（麦克风帧 IPCI 喂主进程 KWS）。
+  - 主进程命中 → `kws:wake` → `_enterConversation()` 连后端 8001 + VAD → `listening`。
+  - 一轮 `reply_end` → `_backToWake()` 回待机。
+- 头部「🎙 语音」按钮保留：点击直接进/退手动对话（`setMicState(true,false)`）。
+
 
 ---
 

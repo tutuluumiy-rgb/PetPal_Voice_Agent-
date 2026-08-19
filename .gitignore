@@ -12,6 +12,10 @@ __pycache__/
 backend/models/
 testboard/vad/*.wasm
 testboard/vad/*.onnx
+frontend/renderer/public/vad/*.onnx
+frontend/renderer/public/vad/*.wasm
+frontend/renderer/public/kws/
+frontend/resources/kws/
 
 # ── 临时文件 ──
 test.mp3

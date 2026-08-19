@@ -42,7 +42,12 @@ export const IPC_CH = {
 
   // TTS 事件：主进程 → 渲染进程（预留，TODO 后续由语音服务触发）
   ttsStart: 'tts-start',
-  ttsEnd: 'tts-end'
+  ttsEnd: 'tts-end',
+
+  // 唤醒词（KWS）：渲染进程 → 主进程（喂 16k 浮点音频帧；主进程 sherpa-onnx-node 推理）
+  kwsFeed: 'kws:feed',
+  // 唤醒命中：主进程 → 渲染进程（广播 keyword，渲染进程据此进对话）
+  kwsWake: 'kws:wake'
 } as const
 
 /** 全局工作模式 */
@@ -112,4 +117,9 @@ export interface AppApi {
   onTtsStart(callback: () => void): () => void
   /** 订阅 TTS 结束事件，返回取消订阅函数 */
   onTtsEnd(callback: () => void): () => void
+
+  /** 喂入一段 16k 浮点音频帧给主进程 KWS（待机时每帧调用） */
+  kwsFeed(frame: Float32Array): void
+  /** 订阅主进程唤醒命中广播（KWS 命中 keyword），返回取消订阅函数 */
+  onKwsWake(callback: (keyword: string) => void): () => void
 }

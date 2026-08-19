@@ -84,6 +84,18 @@ const api: AppApi = {
     return () => {
       ipcRenderer.removeListener(IPC_CH.ttsEnd, listener)
     }
+  },
+
+  // ---------- 唤醒词（KWS）：喂帧 → 主进程推理；命中广播回渲染进程 ----------
+  kwsFeed: (frame: Float32Array): void => {
+    if (frame && frame.length) ipcRenderer.send(IPC_CH.kwsFeed, frame)
+  },
+  onKwsWake: (callback: (keyword: string) => void): (() => void) => {
+    const listener = (_event: unknown, keyword: string): void => callback(keyword)
+    ipcRenderer.on(IPC_CH.kwsWake, listener)
+    return () => {
+      ipcRenderer.removeListener(IPC_CH.kwsWake, listener)
+    }
   }
 }
 

@@ -21,6 +21,7 @@ import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import type { AuthPolicy, PetMode } from '../../../preload/types'
 import { getBallCenterInCanvas, getBallTopLeftInCanvas, getPetSpriteSize } from './pet-canvas'
 import ChatInputBar from './ChatInputBar.vue'
+import { VoicePipeline } from '../../app/voice/VoicePipeline'
 
 const SAFE_MARGIN = 8
 const BALL_GAP = 8
@@ -49,6 +50,70 @@ function pushMessage(role: ChatMessage['role'], text: string): void {
   messages.value = [...messages.value, { role, text }]
 }
 
+// ---------- 语音接入（后端职责提供：连真实后端 8001 /ws/audio + 唤醒词待机） ----------
+const wsUrl = 'ws://127.0.0.1:8001/ws/audio'
+const vadBase = '/vad/'
+// 唤醒词展示文本（实际可唤词由 KWS 模型词表决定，见 resources/kws/keywords.txt；
+// 默认示例「你好西西」在词表内。可改成：小米小米 / 小爱同学 / 你好军哥 / 你好问问 / 小艺小艺 / 蛋哥蛋哥 / 林美丽）
+const wakeKeyword = '你好西西'
+let voice: VoicePipeline | null = null
+const listening = ref(false)   // 是否正在语音交互
+const stateLabel = ref('')     // 待机/聆听状态提示
+
+async function setMicState(on: boolean, wake = false): Promise<void> {
+  try {
+    if (on) {
+      if (!voice) {
+        voice = new VoicePipeline({ wsUrl, vadAssetsBase: vadBase })
+        voice.onUserText = (text) => {
+          if (text) pushMessage('user', text)
+        }
+        voice.onReply = (text) => {
+          if (text) pushMessage('pet', text)
+        }
+        voice.onState = (s) => {
+          // 唤醒模式：idle=待机、listening=正在对话、speaking=回复中
+          stateLabel.value =
+            s === 'idle' ? `待机中，说「${wakeKeyword}」唤醒` : s === 'speaking' ? '正在回复…' : '聆听中…'
+          listening.value = s !== 'idle'
+        }
+        voice.onWake = (kw) => {
+          pushMessage('pet', `(唤醒成功：${kw})`)
+        }
+      }
+      await voice.start(wake ? { wakeWord: true } : undefined)
+      stateLabel.value = wake ? `待机中，说「${wakeKeyword}」唤醒` : '聆听中…'
+    } else {
+      await voice?.stop()
+      listening.value = false
+      stateLabel.value = ''
+    }
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err)
+    console.error('[语音] 启动失败:', reason, err)
+    listening.value = false
+    stateLabel.value = ''
+    pushMessage('pet', '语音连接失败：' + reason)
+    if (voice) {
+      try {
+        await voice.stop()
+      } catch {
+        /* ignore */
+      }
+      voice = null
+    }
+  }
+}
+
+function toggleMic(): void {
+  // 手动点按钮 → 直接进入（或退出）语音对话
+  if (voice?.isRunning) {
+    void setMicState(false)
+  } else {
+    void setMicState(true, false)
+  }
+}
+
 // ---------- 全局状态（单选选中态，与主进程同步） ----------
 const currentMode = ref<PetMode>('chat')
 const authPolicy = ref<AuthPolicy>('ask')
@@ -70,6 +135,8 @@ onMounted(async () => {
   } catch {
     // 保持默认
   }
+  // 自动启动语音：启动即进入「待机听唤醒」；点头部 🎙 按钮才直接对话
+  void setMicState(true, true)
 })
 
 onBeforeUnmount(() => {
@@ -298,6 +365,8 @@ onMounted(() => {
 onBeforeUnmount(() => {
   document.removeEventListener('pointerdown', onPointerDown)
   document.removeEventListener('keydown', onKeyDown)
+  void voice?.stop()
+  voice = null
   if (restoreTimer) {
     clearTimeout(restoreTimer)
     restoreTimer = null
@@ -326,16 +395,28 @@ defineExpose({ open, close, toggle, pushMessage })
       <!-- 头部：40px，标题 + 最右侧关闭面板按钮 -->
       <header class="flex h-10 shrink-0 items-center justify-between border-b border-black/[0.06] px-3">
         <span class="text-[13px] font-semibold text-[#1a1a1a]">球球对话</span>
-        <button
-          type="button"
-          class="flex h-6 w-6 items-center justify-center rounded-full bg-black/[0.06] text-[#8a8a8a] transition-colors duration-200 ease-expo-out hover:bg-black/[0.12] hover:text-[#1a1a1a] active:bg-black/[0.16]"
-          title="关闭面板"
-          @click="close"
-        >
-          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
-            <path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
-          </svg>
-        </button>
+        <div class="flex items-center gap-1.5">
+          <!-- 语音开关：开始/停止语音对话（后端职责提供） -->
+          <button
+            type="button"
+            class="flex h-6 items-center gap-1 rounded-full px-2 text-[11px] font-medium transition-colors duration-200 ease-expo-out"
+            :class="listening ? 'bg-accent text-white' : 'bg-black/[0.06] text-[#8a8a8a] hover:bg-black/[0.12] hover:text-[#1a1a1a]'"
+            :title="listening ? '停止语音' : '开始语音'"
+            @click="toggleMic"
+          >
+            <span :class="listening ? 'animate-pulse' : ''">{{ listening ? `${stateLabel || '● 对话中…'}` : '🎙 语音' }}</span>
+          </button>
+          <button
+            type="button"
+            class="flex h-6 w-6 items-center justify-center rounded-full bg-black/[0.06] text-[#8a8a8a] transition-colors duration-200 ease-expo-out hover:bg-black/[0.12] hover:text-[#1a1a1a] active:bg-black/[0.16]"
+            title="关闭面板"
+            @click="close"
+          >
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+              <path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+            </svg>
+          </button>
+        </div>
       </header>
 
       <!-- 消息区 + 输入区（flex 自适应共享剩余空间） -->
