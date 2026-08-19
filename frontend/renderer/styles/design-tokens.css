@@ -1,0 +1,83 @@
+/* ==========================================================================
+   球球 AI Agent — Linear 风格暗黑设计系统 Token
+   --------------------------------------------------------------------------
+   唯一事实源（Single Source of Truth）。
+   tailwind.config.ts 中的所有扩展值均引用此处 CSS 变量，禁止在组件中
+   散落魔法值。颜色使用「RGB 通道 + 空格分隔」格式，以便 tailwind 通过
+   rgb(var(--x) / <alpha-value>) 支持透明度。
+   ========================================================================== */
+
+:root {
+  /* ---------- 分层背景（0 最深 → 3 最浅） ---------- */
+  --ds-bg-0: 8 9 10;          /* #08090A 窗口/页面底 */
+  --ds-bg-1: 12 13 14;        /* #0C0D0E 次级底 */
+  --ds-bg-2: 17 18 19;        /* #111213 悬停层 */
+  --ds-bg-3: 23 24 26;        /* #17181A 卡片表面 */
+
+  /* ---------- 文字层级 ---------- */
+  --ds-fg-primary: 244 245 246;   /* #F4F5F6 主文本 */
+  --ds-fg-secondary: 148 153 161; /* #9499A1 次级文本 */
+  --ds-fg-muted: 110 115 124;     /* #6E737C 弱化文本 */
+  --ds-fg-inverse: 8 9 10;        /* 强调色上的反色文本 */
+
+  /* ---------- 品牌强调色（Linear 靛蓝） ---------- */
+  --ds-accent: 94 106 210;        /* #5E6AD2 */
+  --ds-accent-hover: 111 123 224; /* #6F7BE0 */
+
+  /* ---------- 语义状态色 ---------- */
+  --ds-success: 76 183 130;       /* #4CB782 */
+  --ds-danger: 242 90 90;         /* #F25A5A */
+  --ds-warning: 245 196 83;       /* #F5C453 */
+
+  /* ---------- hairline 描边（完整 rgba 字符串） ---------- */
+  --ds-line-subtle: rgba(255, 255, 255, 0.06);
+  --ds-line-strong: rgba(255, 255, 255, 0.12);
+
+  /* ---------- 圆角 ---------- */
+  --ds-radius-sm: 6px;    /* 按钮/输入框 */
+  --ds-radius-md: 8px;    /* 次级控件 */
+  --ds-radius-lg: 12px;   /* 弹层内组件 */
+  --ds-radius-2xl: 16px;  /* 卡片/浮层 */
+
+  /* ---------- 多层阴影（禁止单层简单阴影） ---------- */
+  --ds-shadow-sm:
+    0 1px 2px rgba(0, 0, 0, 0.4),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.03);
+  --ds-shadow-md:
+    0 2px 8px rgba(0, 0, 0, 0.35),
+    0 8px 24px rgba(0, 0, 0, 0.3),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+  --ds-shadow-lg:
+    0 4px 16px rgba(0, 0, 0, 0.4),
+    0 16px 48px rgba(0, 0, 0, 0.45),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+  --ds-shadow-hover:
+    0 1px 3px rgba(0, 0, 0, 0.4),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+  --ds-shadow-active:
+    0 1px 2px rgba(0, 0, 0, 0.5),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.03),
+    inset 0 2px 4px rgba(0, 0, 0, 0.3);
+
+  /* ---------- 字体 ---------- */
+  --ds-font-sans: 'Inter', 'Geist Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --ds-font-mono: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
+
+  /* ---------- 字间距（Linear 风格负字距） ---------- */
+  --ds-tracking-tight: -0.011em;  /* 标题 */
+  --ds-tracking-normal: -0.006em; /* 正文 */
+
+  /* ---------- 动效：时长 200–300ms，easing 统一 expo-out，禁止弹跳/spring ---------- */
+  --ds-duration-sm: 200ms;
+  --ds-duration-md: 250ms;
+  --ds-duration-lg: 300ms;
+  --ds-ease-expo-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* ---------- noise 纹理（内联 SVG feTurbulence，零外部资源） ---------- */
+  --ds-noise: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120' viewBox='0 0 120 120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)' opacity='0.55'/%3E%3C/svg%3E");
+
+  /* ---------- 控制面板分层背景：径向渐变底层 + noise 纹理 ---------- */
+  --ds-layered-bg:
+    radial-gradient(120% 90% at 50% -10%, rgba(94, 106, 210, 0.07), transparent 60%),
+    rgb(var(--ds-bg-0));
+}

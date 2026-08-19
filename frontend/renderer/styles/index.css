@@ -1,0 +1,102 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ==========================================================================
+   全局基础层：字体、防误选、滚动条、背景、降级动效
+   所有颜色/阴影/动效均引用 design-tokens.css 中的 token
+   ========================================================================== */
+
+@layer base {
+  html,
+  body {
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    /* 宠物窗口（透明画布）：body 背景必须透明，无黑色背景；
+       控制面板的暗色分层背景由 PanelShell 根容器（ds-layered-bg）提供 */
+    background: transparent;
+    color: rgb(var(--ds-fg-primary));
+    font-family: var(--ds-font-sans);
+    letter-spacing: var(--ds-tracking-normal);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* 宠物画布：只渲染图形，非图形区域像素全部透明（行为类似 PNG） */
+  canvas {
+    background: transparent;
+  }
+
+  /* 桌面宠物场景：禁止窗口内容拖拽导致误选中图片/文本 */
+  * {
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  img {
+    -webkit-user-drag: none;
+    user-drag: none;
+  }
+
+  /* 输入类控件允许选择文本 */
+  input,
+  textarea {
+    user-select: text;
+    -webkit-user-select: text;
+  }
+
+  /* 暗黑滚动条 */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.12);
+    border-radius: 4px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.2);
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::selection {
+    background: rgb(var(--ds-accent) / 0.3);
+  }
+}
+
+/* ---------- 分层背景 + noise 工具类（控制面板全局使用） ---------- */
+@layer components {
+  .ds-layered-bg {
+    background: var(--ds-layered-bg);
+  }
+
+  .ds-noise-overlay {
+    background-image: var(--ds-noise);
+    background-size: 120px 120px;
+  }
+
+  /* glass 毛玻璃卡片（右键上下文卡片规范） */
+  .ds-glass {
+    background: rgb(var(--ds-bg-3) / 0.62);
+    backdrop-filter: blur(24px);
+    -webkit-backdrop-filter: blur(24px);
+    border: 1px solid var(--ds-line-subtle);
+    box-shadow: var(--ds-shadow-lg);
+  }
+}
+
+/* ---------- prefers-reduced-motion：动画降级关闭 ---------- */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
