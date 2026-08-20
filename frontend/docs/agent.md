@@ -201,7 +201,9 @@ npm start            # electron-vite preview（预览构建产物）
 
 ## 7. 环境与工作约定
 
-- **PowerShell 7（pwsh）优先**，不要用 Windows PowerShell 5.1。
+- **统一使用 PowerShell 7（pwsh）**：当前环境就是 PowerShell 7，以后一律用
+  `pwsh`（PowerShell 7）执行命令，**不要用其他版本的 pwsh**（如 Windows
+  PowerShell 5.1 / `powershell.exe`、便携版 pwsh）。
 - 前端只允许改 `frontend/` 目录；**禁止改动** `backend/`、`testboard/`、根目录 `docs/`；
   前后端协议/字段/端口不变更。
 - 不提交模型文件（`.onnx`/`.wasm`）、`.env`、密钥（已 gitignore）。
