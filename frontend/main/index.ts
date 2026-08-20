@@ -6,7 +6,7 @@
  */
 import { app, BrowserWindow, session } from 'electron'
 import { registerIpcHandlers } from './ipc'
-import { createPetWindow, destroyWindows } from './windows'
+import { createPetWindow, destroyWindows, createChatWindow } from './windows'
 import { setupKws } from './kws'
 
 // ---------- 媒体权限：允许 renderer 使用麦克风（语音采集 getUserMedia 必需） ----------
@@ -42,6 +42,11 @@ if (!gotLock) {
 
     // 启动即创建悬浮宠物主窗口；控制面板由右键菜单「设置」按需打开
     createPetWindow()
+
+    // 预创建（隐藏）的独立对话面板窗口：其渲染进程承载语音管线，常驻后台，
+    // 保证宠物即使不打开面板也能被唤醒（与之前宠物窗口常驻语音行为一致）。
+    // 打开/关闭面板只 show/hide 该窗口，不影响宠物窗口尺寸与显示。
+    createChatWindow()
 
     // TODO: 后续迭代实现 — 初始化 WebSocket 长连接、语音服务（ASR/TTS）、全局状态机
   })

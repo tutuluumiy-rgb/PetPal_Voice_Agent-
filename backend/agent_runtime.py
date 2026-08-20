@@ -28,8 +28,9 @@ import json
 import time
 import uuid
 
-from agent_config import get_mode_config
+from agent_config import get_mode_config, history_budget_tokens
 from session_store import SessionStore
+from session_store import _estimate_tokens
 from context_builder import build_model_context
 from compaction import (
     CompactionState,
@@ -163,6 +164,66 @@ async def _stream_final_sentences(stream, t_start):
         yield strip_emotion_tags(buffer), emotion
 
 
+def _v2_memory_text(memory_fs, memory_max_tokens):
+    """v2 扁平记忆注入文本（MEMORY.md + 昨日日志，预算内）。memory_fs 为 None 或不可用时返回 None。"""
+    if memory_fs is None:
+        return None
+    try:
+        return memory_fs.build_inject_text(max_tokens=memory_max_tokens or 1800)
+    except Exception as e:
+        print(f"[memory] 记忆注入文本构建失败(降级为空): {e}")
+        return None
+
+
+async def _persist_after_compaction(memory_fs, summary: str):
+    """压缩提交后的低层记忆持久化（design 2.5，异步不阻塞主流程）。
+
+    把检查点摘要沉淀进每日日志 + 对话存档 + MEMORY.md。文件 IO 小且快，
+    作为独立 task 调度，不阻塞 agent 环继续回复。
+    """
+    try:
+        import datetime as _dt
+        today = _dt.date.today().isoformat()
+        lines = [ln.strip() for ln in (summary or "").splitlines() if ln.strip()]
+
+        # 解析五层字段：标题行后紧跟的若干非标题行为其取值（goal/constraints/...）
+        heads = {"goal", "constraints", "progress", "keydecision", "nextsteps"}
+        def _heading_values():
+            out = []
+            for i, ln in enumerate(lines):
+                if ln in heads and i + 1 < len(lines) and lines[i + 1] not in heads:
+                    out.append(lines[i + 1])
+            return out
+
+        # 1) dialog/YYYY-MM-DD.json：新增一条压缩检查点条目
+        try:
+            memory_fs.upsert_dialog({
+                "id": f"compaction-{int(__import__('time').time() * 1000)}",
+                "kind": "memory_compact",
+                "date": today,
+                "summary": (summary or "")[:800],
+            })
+        except Exception as e:
+            print(f"[memory] dialog 落盘失败(不阻塞): {e}")
+        # 2) memory/YYYY-MM-DD.md：追加当日关键点（取各字段取值）
+        facts = [v for v in _heading_values() if v]
+        if facts:
+            try:
+                memory_fs.append_daily_md("；".join(facts[:8])[:300])
+            except Exception as e:
+                print(f"[memory] 每日日志落盘失败(不阻塞): {e}")
+        # 3) MEMORY.md：沉淀关键决策/下一步（长期事务/知识主干）
+        keep_heads = {"keydecision", "nextsteps"}
+        for i, ln in enumerate(lines):
+            if ln in keep_heads and i + 1 < len(lines) and lines[i + 1] not in heads:
+                try:
+                    memory_fs.append_memory_md(f"{ln}{lines[i + 1]}"[:200])
+                except Exception as e:
+                    print(f"[memory] MEMORY.md 落盘失败(不阻塞): {e}")
+    except Exception as e:
+        print(f"[memory] 压缩后记忆持久化失败(不阻塞): {e}")
+
+
 async def run_agent_loop(
     client,
     model,
@@ -176,6 +237,8 @@ async def run_agent_loop(
     summarizer=None,
     on_tool=None,
     config=None,
+    memory_store=None,
+    memory_fs=None,
 ):
     """执行一次完整 run（多 sub_turn 原生 function calling）。
 
@@ -193,6 +256,8 @@ async def run_agent_loop(
         summarizer: async (prompt_text)->str，压缩摘要模型回调；None 则不压缩
         on_tool: async (stage, name, call_id, text) 进度回调
         config: 可选 ModeAgentConfig 覆盖（默认按 mode 查 get_mode_config，测试/特殊场景用）
+        memory_fs: 可选 MemoryFs 实例；压缩提交后异步持久化每日日志/对话/MEMORY.md
+                   （design 2.5，异步不阻塞主流程）
 
     yield 事件见模块 docstring。
     """
@@ -207,17 +272,34 @@ async def run_agent_loop(
     while True:
         yield ("sub_turn", sub_turn)
 
-        # ── 1) 从会话层重建上下文（含此前 sub_turn 的工具结果/压缩检查点）──
+        # ── 1) 从会话层重建上下文（含此前 sub_turn 的工具结果/压缩检查点/记忆）──
         transcript = session.transcript()
         ctx = build_model_context(
             system_prompt, transcript, config,
             user_profile=user_profile,
             checkpoint_summary=compaction_state.summary,
+            # v2 扁平文件记忆优先（MEMORY.md+昨日）；无 memory_fs 时回退 v1 分层
+            memory_blocks=memory_store.recall_blocks() if (memory_store and memory_fs is None) else None,
+            memory_text=_v2_memory_text(memory_fs, None),
         )
 
-        # ── 2) 压缩：context 估算超阈值 → 压旧完整轮 ──
-        if summarizer is not None and ctx.estimated_tokens >= config.compaction_threshold:
-            dec = prepare_compaction(transcript, config, compaction_state)
+        # ── 2) 压缩/上下文拆分：超出 check_context 预算（design 2.2）→ 压旧完整轮 ──
+        _budget = config.compaction_threshold
+        _over_budget = False
+        if summarizer is not None:
+            sys_tokens = sum(_estimate_tokens(m.get("content", "")) for m in ctx.model_context
+                             if m.get("role") == "system")
+            summary_tokens = _estimate_tokens(compaction_state.summary) if compaction_state.summary else 0
+            _budget = history_budget_tokens(sys_tokens, summary_tokens)
+            hist_tokens = sum(_estimate_tokens(m.get("content", "")) for m in ctx.model_context
+                              if m.get("role") != "system")
+            _over_budget = (hist_tokens >= _budget
+                            or ctx.estimated_tokens >= config.compaction_threshold)
+        if summarizer is not None and _over_budget:
+            dec = prepare_compaction(
+                transcript, config, compaction_state,
+                threshold=min(_budget, config.compaction_threshold),
+            )
             if dec.should_compact and dec.messages_to_summarize:
                 try:
                     summary = await generate_checkpoint_summary(
@@ -232,11 +314,19 @@ async def run_agent_loop(
                             first_kept_message_index=0,
                         )
                         yield ("compacted", compaction_state.compaction_count)
+                        # 压缩后异步持久化记忆（design 2.5，不阻塞主流程）
+                        if memory_fs is not None:
+                            try:
+                                asyncio.create_task(_persist_after_compaction(memory_fs, summary))
+                            except Exception as e:
+                                print(f"[memory] 调度压缩后持久化失败: {e}")
                         # 用新检查点重建上下文
                         ctx = build_model_context(
                             system_prompt, transcript, config,
                             user_profile=user_profile,
                             checkpoint_summary=compaction_state.summary,
+                            memory_blocks=memory_store.recall_blocks() if (memory_store and memory_fs is None) else None,
+                            memory_text=_v2_memory_text(memory_fs, None),
                         )
                 except Exception as e:
                     print(f"[agent_runtime] 压缩失败（不丢历史，继续）: {e}")

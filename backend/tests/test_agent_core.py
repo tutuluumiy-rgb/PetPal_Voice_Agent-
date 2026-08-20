@@ -30,13 +30,14 @@ def _user_turn(store, run_id, text, with_tool=False, tool_result="查到了：�
 def test_config():
     chat = get_mode_config(CHAT_MODE)
     work = get_mode_config(WORK_MODE)
-    assert chat.keep_complete_turns == 20 and chat.max_sub_turns == 10
-    assert work.keep_complete_turns == 10 and work.max_sub_turns == 30
+    assert chat.keep_complete_turns == 15 and chat.max_sub_turns == 10
+    assert work.keep_complete_turns == 5 and work.max_sub_turns == 30
     assert chat.drop_old_tool_results is False
     assert work.drop_old_tool_results is True
     assert chat.context_max_tokens == QWEN_CONTEXT_TOKENS == 1_000_000
     assert chat.compaction_threshold == 700_000
-    print("[OK] 模式配置（闲聊20轮/10sub，工作10轮/30sub，1M/0.7→700k）")
+    assert chat.chat_max_rounds == 15 and work.chat_max_rounds == 0
+    print("[OK] 模式配置（闲聊15轮/10sub，工作5轮/30sub，1M/0.7→700k；chat 15 轮触发压缩）")
 
 
 # 工作区内可写的临时会话目录（沙箱禁写系统 TEMP）
@@ -151,8 +152,8 @@ def test_compaction_loop_event():
         store.add("assistant", "答" + "机" * 300, run_id=f"c{i}", sub_turn=2)
 
     async def _summarize(prompt_text):
-        return ("## Goal\n压缩测试\n## Progress\n进行中\n## Key Decisions\n无\n"
-                "## Next Steps\n完成\n## Critical Context\n关键上下文\n")
+        return ("goal\n压缩测试\nconstraints\n无约束\nprogress\n进行中\n"
+                "keydecision\n关键决策\nnextsteps\n完成\n")
 
     cfg = ModeAgentConfig(mode=WORK_MODE, keep_complete_turns=1, max_sub_turns=30,
                           drop_old_tool_results=True, context_max_tokens=1_000_000,

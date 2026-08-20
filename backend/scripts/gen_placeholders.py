@@ -2,10 +2,11 @@
 """预生成前端占位音频（Placeholder WAV）。
 
 把这些「固定提示语」用后端现有 TTS 合成一次、落盘成 WAV，
-前端在等待/失败/连接异常等场景本地播放 —— 不依赖每次运行时云 TTS，
+前端在等待/失败/连接异常/唤醒等场景本地播放 —— 不依赖每次运行时云 TTS，
 低延迟、可复用、前后端解耦。
 
-输出目录：testboard/audio/placeholders/*.wav（24kHz mono 16bit PCM）
+输出目录：frontend/renderer/public/placeholders/*.wav（24kHz mono 16bit PCM）
+  即前端 renderer 静态资源，前端 PlaceholderPlayer 用 `/placeholders/<key>.wav` 播放。
 
 用法（在 backend 目录）：
     python scripts/gen_placeholders.py            # 全部合成
@@ -25,9 +26,9 @@ SAMPLE_RATE = 24000
 CHANNELS = 1
 SAMPLE_WIDTH = 2  # 16-bit
 
-# 输出目录：<仓库根>/testboard/audio/placeholders（脚本在 backend/scripts/，往上 3 层到仓库根）
+# 输出目录：<仓库根>/frontend/renderer/public/placeholders（脚本在 backend/scripts/，往上 3 层到仓库根）
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-TESTBOARD_AUDIO_DIR = os.path.join(_REPO_ROOT, "testboard", "audio", "placeholders")
+FRONTEND_AUDIO_DIR = os.path.join(_REPO_ROOT, "frontend", "renderer", "public", "placeholders")
 
 # ── 占位文案库（key → 文案）────────────────────────
 # 前端 PlaceholderPlayer 用 key 索引；文案可在此增删，增改后重跑本脚本即可。
@@ -79,7 +80,7 @@ async def synth_one(tts, key: str, text: str) -> bytes:
 
 
 async def _main(keys: list[str] | None):
-    os.makedirs(TESTBOARD_AUDIO_DIR, exist_ok=True)
+    os.makedirs(FRONTEND_AUDIO_DIR, exist_ok=True)
     tts = get_tts()
     selection = keys if keys else list(PLACEHOLDERS)
     for key in selection:
@@ -87,7 +88,7 @@ async def _main(keys: list[str] | None):
             print(f"[skip] 未知 key: {key}")
             continue
         text = PLACEHOLDERS[key]
-        dst = os.path.join(TESTBOARD_AUDIO_DIR, f"{key}.wav")
+        dst = os.path.join(FRONTEND_AUDIO_DIR, f"{key}.wav")
         try:
             pcm = await synth_one(tts, key, text)
             wav = pcm_to_wav(pcm, SAMPLE_RATE, CHANNELS, SAMPLE_WIDTH)
@@ -97,7 +98,7 @@ async def _main(keys: list[str] | None):
             print(f"[OK] {key:16s} {len(wav):7d}B  {dur:4.2f}s  <- {text}")
         except Exception as e:
             print(f"[FAIL] {key:16s} {e}")
-    print(f"\n输出目录: {TESTBOARD_AUDIO_DIR}")
+    print(f"\n输出目录: {FRONTEND_AUDIO_DIR}")
 
 
 if __name__ == "__main__":

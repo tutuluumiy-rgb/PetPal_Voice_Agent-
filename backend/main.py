@@ -28,6 +28,11 @@ from prompt_loader import build_system_prompt, load_user_profile, get_active_use
 from session_store import SessionStore
 from compaction import CompactionState, COMPACTION_SYSTEM_PROMPT
 from agent_runtime import run_agent_loop
+from agent_config import DEFAULT_MEMORY_CONFIG
+from memory_store import MemoryStore
+from memory_extractor import MemoryExtractor
+from memory_fs import MemoryFs
+from tools import memory as _mem_tools
 from agent_state import (
     LISTENING as ST_LISTENING,
     THINKING as ST_THINKING,
@@ -125,6 +130,31 @@ tts = get_tts()
 emotion_state = EmotionState()
 # 双模式全局状态机（闲聊/工作；默认闲聊；语音指令 + 手动均可切换）
 mode_state = ModeState()
+
+# ── 记忆模块（分层：L1 事件 / L2 事实 / L3 自传；会话结束归档 + 主动记忆工具）──
+# 按当前启用用户分目录存记忆（backend/memories/<ACTIVE_USER>/）
+memory_store = MemoryStore.for_user(get_active_user_id())
+_mem_config = DEFAULT_MEMORY_CONFIG
+# v2 扁平文件系统记忆层（MEMORY.md / memory/YYYY-MM-DD.md / tool_result/ / dialog/）
+# 每用户独立 working_dir，避免多用户串味
+memory_fs = MemoryFs(working_dir=os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "memories", get_active_user_id()
+))
+
+
+async def _memory_summarizer(messages):
+    """记忆抽取/聚合/判重的 LLM 回调（独立小调用，不污染主回复链路）。
+
+    messages: [{role:"system",...},{role:"user",...}]，指令已由 extractor 拼好。
+    """
+    resp = await llm.client.chat.completions.create(
+        model=llm.model, messages=messages, temperature=0.3, max_tokens=1200, stream=False,
+    )
+    return resp.choices[0].message.content or ""
+
+
+memory_extractor = MemoryExtractor(memory_store, summarizer=_memory_summarizer, config=_mem_config)
+_mem_tools.bind_memory(memory_store, memory_extractor, memory_fs=memory_fs)
 
 
 # 【语气词黑名单】ASR 识别结果如果只包含这些词（可重复、可带标点），直接丢弃
@@ -309,6 +339,78 @@ class ConversationSession:
 @app.get("/health")
 async def health():
     return {"status": "ok", "pipeline": "AEC(browser)→VAD→ASR→LLM→TTS"}
+
+
+# ── Phase ⑤ 预留接口：user_profile / personality 查看与修改（前端 web 可视化用）──
+def _profile_json_path(user_id: str | None = None) -> str:
+    from prompt_loader import USERS_DIR
+    user_id = user_id or get_active_user_id()
+    return os.path.join(USERS_DIR, user_id, "profile.json")
+
+
+@app.get("/memory/profile")
+async def memory_get_profile(user_id: str | None = None):
+    """读取当前用户的 user_profile（profile.json + MEMORY.md 长期主干）。"""
+    uid = user_id or get_active_user_id()
+    p = _profile_json_path(uid)
+    profile = {}
+    if os.path.exists(p):
+        try:
+            with open(p, encoding="utf-8") as f:
+                profile = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            profile = {}
+    return {
+        "user_id": uid,
+        "profile": profile,
+        "rendered": load_user_profile(uid),
+        "memory_md": memory_fs.read_memory_md(),
+        "memory_md_tokens": memory_fs.memory_md_tokens(),
+    }
+
+
+@app.put("/memory/profile")
+async def memory_put_profile(payload: dict, user_id: str | None = None):
+    """更新 user_profile（profile.json 字段覆写；可选 text 追加到 MEMORY.md）。"""
+    uid = user_id or get_active_user_id()
+    p = _profile_json_path(uid)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    profile = {}
+    if os.path.exists(p):
+        try:
+            with open(p, encoding="utf-8") as f:
+                profile = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            profile = {}
+    # 允许按字段覆写
+    for k in ("basic", "reply_style", "likes", "dislikes", "daily"):
+        if k in payload:
+            profile[k] = payload[k]
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(profile, f, ensure_ascii=False, indent=2)
+    # 可选：把一句话沉淀进 MEMORY.md（长期事务/偏好主干）
+    if payload.get("text"):
+        memory_fs.append_memory_md(str(payload["text"])[:200])
+    return {"ok": True, "user_id": uid, "profile": profile}
+
+
+@app.get("/memory/personality")
+async def memory_get_personality():
+    """读取 personality.md（宠物人格，前端可视化编辑）。"""
+    from prompt_loader import load_prompt as _lp
+    return {"personality.md": _lp("personality.md")}
+
+
+@app.put("/memory/personality")
+async def memory_put_personality(payload: dict):
+    """覆写 personality.md。"""
+    text = payload.get("content", "")
+    if not isinstance(text, str):
+        return {"ok": False, "error": "content 需要为字符串"}
+    from prompt_loader import PROMPTS_DIR
+    with open(os.path.join(PROMPTS_DIR, "personality.md"), "w", encoding="utf-8") as f:
+        f.write(text.strip() + "\n")
+    return {"ok": True}
 
 
 @app.websocket("/ws/audio")
@@ -897,14 +999,22 @@ async def handle_user_speech(ws: WebSocket, session: ConversationSession, text: 
             )
 
     async def _summarize(prompt_text: str) -> str:
-        """独立无工具模型调用，生成/更新压缩检查点（超长对话才触发）。"""
+        """独立无工具模型调用，生成/更新压缩检查点（超长对话才触发）。
+
+        摘要长度按 COMPACT_SUMMARY_RATIO(0.1) 约束：约为被压缩历史 token 的 10%，
+        设上下限 [200, 2000] 防止过短/过长。
+        """
+        from agent_config import COMPACT_SUMMARY_RATIO
+        # 粗略估算被压缩历史 token（prompt 文本长度 / 4），乘 0.1 作为摘要预算
+        hist_tokens = max(1, len(prompt_text) // 4)
+        budget = max(200, min(2000, int(hist_tokens * COMPACT_SUMMARY_RATIO)))
         resp = await llm.client.chat.completions.create(
             model=llm.model,
             messages=[
                 {"role": "system", "content": COMPACTION_SYSTEM_PROMPT},
                 {"role": "user", "content": prompt_text},
             ],
-            max_tokens=800,
+            max_tokens=budget,
             stream=False,
         )
         return resp.choices[0].message.content or ""
@@ -918,6 +1028,7 @@ async def handle_user_speech(ws: WebSocket, session: ConversationSession, text: 
             compaction_state=session.agent_compaction,
             summarizer=_summarize,
             on_tool=_on_tool,
+            memory_fs=memory_fs,
         ):
             # 被打断：停止后续句子的生成和播放
             if session.abort_speaking:
@@ -1250,6 +1361,71 @@ async def cleanup_session(session: ConversationSession):
     except Exception:
         pass
     asr.reset(session.session_id)
+
+    # 记忆会话结束归档（异步，不阻塞断开；仅在记忆开启时）
+    if _mem_config.enabled:
+        try:
+            asyncio.create_task(_archive_session_memory(session))
+        except Exception as e:
+            print(f"[memory] 归档调度失败: {e}")
+
+
+async def _archive_session_memory(session: ConversationSession):
+    """把本次会话的整体 transcript 归档进记忆：抽取 L1 →（按节流）沉淀 L2 → 聚合 L3。"""
+    try:
+        pairs = []
+        for m in session.store.transcript():
+            role = m.get("role", "?")
+            content = m.get("content")
+            if isinstance(content, str) and content.strip():
+                pairs.append((role, content))
+        if not pairs:
+            return
+        source = {"session_id": getattr(session, "session_id", None)}
+        await memory_extractor.on_session_end(pairs, source=source)
+    except Exception as e:
+        print(f"[memory] 会话归档失败（不阻塞）: {e}")
+
+
+# ── 每日主动记忆持久化（design 2.5：压缩后 + 每日主动一次，异步、不阻塞）──
+_daily_persist_date: str = ""
+
+
+async def _daily_persist_once():
+    """后台任务：每天至少执行一次低层记忆持久化（写入当日日志/对话基线）。"""
+    global _daily_persist_date
+    try:
+        import datetime as _d
+        today = _d.date.today().isoformat()
+        if _daily_persist_date == today:
+            return
+        _daily_persist_date = today
+        # 每日基线：给当日 dialog 写一条占位/归档条目，确保当日文件存在供回溯
+        try:
+            memory_fs.upsert_dialog({
+                "id": f"daily-{today}",
+                "kind": "daily_baseline",
+                "date": today,
+                "created_at": _d.datetime.now().isoformat(timespec="seconds"),
+            })
+        except Exception as e:
+            print(f"[memory] 每日基线落盘失败(不阻塞): {e}")
+    except Exception as e:
+        print(f"[memory] 每日持久化失败(不阻塞): {e}")
+
+
+async def _daily_persist_loop():
+    while True:
+        try:
+            await _daily_persist_once()
+        except Exception:
+            pass
+        await asyncio.sleep(3600)  # 每小时检查一次（已写则当天不再写）
+
+
+@app.on_event("startup")
+async def _start_daily_persist():
+    asyncio.create_task(_daily_persist_loop())
 
 
 if __name__ == "__main__":

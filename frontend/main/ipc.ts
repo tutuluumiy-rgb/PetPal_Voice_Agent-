@@ -18,7 +18,7 @@ import {
   setMode,
   setPetVisible
 } from './state'
-import { openPanelWindow, resizePetWindowForPanel } from './windows'
+import { openPanelWindow, openChatPanel, closeChatPanel } from './windows'
 
 /** 注册全部 IPC 处理器（app ready 后调用一次） */
 export function registerIpcHandlers(): void {
@@ -76,23 +76,40 @@ export function registerIpcHandlers(): void {
     dragEnd()
   })
 
-  // ---------- 悬浮设置面板窗口尺寸 ----------
-  // 右键弹出/关闭上下文菜单 与 普通 panel:height 走同一条路径。
-  // async：resizePetWindowForPanel 内部会 await 窗口 resize/move 事件，
-  // 等窗口物理布局真正完成后再返回真实 getBounds()（无盲 sleep）。
-  ipcMain.handle(IPC_CH.panelHeight, async (_event, payload: unknown): Promise<{ x: number; y: number } | undefined> => {
-    const p = payload as { height?: unknown; ballScreen?: unknown; ballInCanvas?: unknown } | null
-    const height = p?.height
-    if (typeof height === 'number' && Number.isFinite(height) && height >= 0) {
-      const ball = p?.ballScreen as { x?: unknown; y?: unknown } | null
-      const bInC = p?.ballInCanvas as { x?: unknown; y?: unknown } | null
-      return resizePetWindowForPanel(
-        height,
-        typeof ball?.x === 'number' && typeof ball?.y === 'number' ? { x: ball.x, y: ball.y } : undefined,
-        typeof bInC?.x === 'number' && typeof bInC?.y === 'number' ? { x: bInC.x, y: bInC.y } : undefined
-      )
+  // ---------- 独立对话面板窗口（宠物窗口尺寸恒定，面板独立成窗口） ----------
+  // 打开：创建/显示独立对话面板窗口并按宠物位置定位；宠物窗口不受影响。
+  ipcMain.on(IPC_CH.chatPanelOpen, (): void => {
+    openChatPanel()
+  })
+
+  // 关闭：隐藏独立对话面板窗口；宠物窗口不受影响。
+  ipcMain.on(IPC_CH.chatPanelClose, (): void => {
+    closeChatPanel()
+  })
+
+  // ---------- 语音播报预览：对话面板推送 → 广播到宠物窗口底部消息条 ----------
+  // 保留最近一次文本（供新开的宠物窗口/面板回放「当次」语音播报）
+  let lastVoicePreview = ''
+  ipcMain.on(IPC_CH.voicePreviewPush, (_event, text: unknown): void => {
+    lastVoicePreview = typeof text === 'string' ? text : String(text ?? '')
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) {
+        win.webContents.send(IPC_CH.voicePreview, lastVoicePreview)
+      }
     }
-    return undefined
+  })
+
+  // 宠物窗口挂载后可回放最近一次语音播报内容
+  ipcMain.handle(IPC_CH.voicePreviewGet, (): string => lastVoicePreview)
+
+  // ---------- 宠物动画状态：对话面板说开始/结束 → 广播到宠物窗口 ----------
+  ipcMain.on(IPC_CH.petAnim, (_event, state: unknown): void => {
+    const s = state === 'speaking' ? 'speaking' : 'idle'
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) {
+        win.webContents.send(IPC_CH.petAnimChanged, s)
+      }
+    }
   })
 
   // ---------- 宠物可见性 ----------

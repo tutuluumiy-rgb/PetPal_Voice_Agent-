@@ -22,15 +22,32 @@ import re
 from .calculator import calculator
 from .search import web_search
 from .weather import get_weather
+from .memory import memory_add, memory_forget, MEMORY_ADD_TOOL, MEMORY_FORGET_TOOL
 
 # ── 模式常量（与 mode_state 保持一致）────────────────────────
 CHAT_MODE = "chat"
 WORK_MODE = "work"
 
-# 闲聊模式工具白名单（用户指定：搜索、读取、计算）
+# 闲聊模式工具白名单（搜索/读取/计算 + 主动记忆）
 CHAT_MODE_TOOLS = {"web_search", "read", "calculator"}
 # 工作模式工具白名单（全开）
 WORK_MODE_TOOLS = None  # None = 全量
+
+
+def _memory_tool_names() -> list:
+    """主动记忆工具名（chat 是否开放由 agent_config 开关决定）。"""
+    names = ["memory_add", "memory_forget"]
+    try:
+        from agent_config import MEMORY_TOOL_CHAT_ENABLED
+        if MEMORY_TOOL_CHAT_ENABLED:
+            return names
+    except Exception:
+        return ["memory_forget"]  # 保守：不明确开启时只给删除（无副作用）
+    return ["memory_forget"]
+
+# 动态往 chat 白名单追加主动记忆工具
+for _n in _memory_tool_names():
+    CHAT_MODE_TOOLS.add(_n)
 
 
 def _tools_for_mode(mode: str) -> set | None:
@@ -91,6 +108,16 @@ TOOL_DEFINITIONS = {
             },
         },
         "executor": calculator,
+    },
+    "memory_add": {
+        "type": "function",
+        "function": MEMORY_ADD_TOOL["function"],
+        "executor": memory_add,
+    },
+    "memory_forget": {
+        "type": "function",
+        "function": MEMORY_FORGET_TOOL["function"],
+        "executor": memory_forget,
     },
 }
 

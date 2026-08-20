@@ -45,13 +45,12 @@ const api: AppApi = {
     ipcRenderer.send(IPC_CH.dragEnd)
   },
 
-  // ---------- 悬浮设置面板窗口尺寸 ----------
-  setPanelHeight: (
-    panelHeight: number,
-    ballScreen?: { x: number; y: number },
-    ballInCanvas?: { x: number; y: number }
-  ): Promise<{ x: number; y: number } | undefined> => {
-    return ipcRenderer.invoke(IPC_CH.panelHeight, { height: panelHeight, ballScreen, ballInCanvas })
+  // ---------- 独立对话面板窗口（打开/关闭；宠物窗口不受影响） ----------
+  openChatPanel: (): void => {
+    ipcRenderer.send(IPC_CH.chatPanelOpen)
+  },
+  closeChatPanel: (): void => {
+    ipcRenderer.send(IPC_CH.chatPanelClose)
   },
 
   // ---------- 宠物可见性 ----------
@@ -95,6 +94,32 @@ const api: AppApi = {
     ipcRenderer.on(IPC_CH.kwsWake, listener)
     return () => {
       ipcRenderer.removeListener(IPC_CH.kwsWake, listener)
+    }
+  },
+
+  // ---------- 语音播报预览（宠物窗口底部消息条） ----------
+  pushVoicePreview: (text: string): void => {
+    ipcRenderer.send(IPC_CH.voicePreviewPush, String(text ?? ''))
+  },
+  onVoicePreview: (callback: (text: string) => void): (() => void) => {
+    const listener = (_event: unknown, text: string): void => callback(String(text ?? ''))
+    ipcRenderer.on(IPC_CH.voicePreview, listener)
+    return () => {
+      ipcRenderer.removeListener(IPC_CH.voicePreview, listener)
+    }
+  },
+  getVoicePreview: (): Promise<string> => ipcRenderer.invoke(IPC_CH.voicePreviewGet),
+
+  // ---------- 宠物动画状态（chat → 主进程 → pet） ----------
+  setPetAnim: (state: 'speaking' | 'idle'): void => {
+    ipcRenderer.send(IPC_CH.petAnim, state === 'speaking' ? 'speaking' : 'idle')
+  },
+  onPetAnimChanged: (callback: (state: 'speaking' | 'idle') => void): (() => void) => {
+    const listener = (_event: unknown, state: string): void =>
+      callback(state === 'speaking' ? 'speaking' : 'idle')
+    ipcRenderer.on(IPC_CH.petAnimChanged, listener)
+    return () => {
+      ipcRenderer.removeListener(IPC_CH.petAnimChanged, listener)
     }
   }
 }

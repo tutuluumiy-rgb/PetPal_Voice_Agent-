@@ -98,11 +98,11 @@ def load_user_profile(user_id: str) -> str:
 
 
 def build_system_prompt(mode: str | None = None) -> str:
-    """组装完整系统提示词：人格 + 语气 + 工具指南 + 可用工具目录 + 当前用户档案
+    """组装完整系统提示词：人格 + 语气 + 通用准则 + (模式专用) + 工具目录 + 用户档案
 
     双模式（mode_state 的 CHAT_MODE / WORK_MODE）：
-        chat（闲聊，默认）：personality + voice_style + system_prompt.md + 闲聊工具目录
-        work（工作）       ：personality + voice_style + work_system_prompt.md + 全量工具目录
+        chat（闲聊，默认）：personality + voice_style + agent.md + chat_system_prompt.md + 闲聊工具目录
+        work（工作）       ：personality + voice_style + agent.md + work_system_prompt.md + 全量工具目录
     工具目录（build_catalog_md(mode)）为动态生成——按模式过滤，新增工具后自动出现。
     mode=None 时按闲聊处理（向后兼容无参调用）。
     """
@@ -110,7 +110,7 @@ def build_system_prompt(mode: str | None = None) -> str:
     from mode_state import CHAT_MODE, WORK_MODE
 
     mode = mode or CHAT_MODE
-    system_part = "work_system_prompt.md" if mode == WORK_MODE else "system_prompt.md"
+    mode_prompt = "work_system_prompt.md" if mode == WORK_MODE else "chat_system_prompt.md"
 
     # 显式标注当前模式：让 LLM 答"你现在是什么模式？"时能据实回答
     mode_label = "工作模式" if mode == WORK_MODE else "闲聊模式"
@@ -119,8 +119,9 @@ def build_system_prompt(mode: str | None = None) -> str:
     parts = [
         load_prompt("personality.md"),
         load_prompt("voice_style.md"),
-        load_prompt(system_part),
-        build_catalog_md(mode),  # 第一级披露：按模式过滤的工具目录
+        load_prompt("agent.md"),            # 通用准则（原 system_prompt.md 改名 + 扩充）
+        load_prompt(mode_prompt),           # 模式专用提示词
+        build_catalog_md(mode),             # 第一级披露：按模式过滤的工具目录
         mode_mark,
         load_user_profile(get_active_user_id()),
     ]

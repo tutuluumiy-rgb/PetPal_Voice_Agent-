@@ -57,12 +57,26 @@ export class VoicePipeline {
   /** 唤醒词命中回调（供 UI 提示，如显示「听到你了」） */
   onWake?: (keyword: string) => void
 
+  // ---------- 方案 A：唤醒后连续对话，空闲超时回待机；口语退出规则 ----------
+  /** 对话空闲超时（毫秒）：超过无语音/无回复进展 → 回待机重新等唤醒 */
+  private readonly conversationIdleMs = 45000
+  private idleTimer: ReturnType<typeof setTimeout> | null = null
+
   constructor(opts: VoicePipelineOptions) {
     this.wsUrl = opts.wsUrl
     this.vadBase = opts.vadAssetsBase ?? '/vad/'
     this.posTh = opts.positiveThreshold ?? 0.4
     this.negTh = opts.negativeThreshold ?? 0.35
   }
+
+  /**
+   * 退出对话的口语规则（命中即结束本轮对话回待机，不是退出前端）。
+   * 全角/半角、首尾空格可容错；与用户说法的子串匹配。
+   */
+  private readonly EXIT_WORDS: readonly string[] = [
+    '拜拜', '再见', '退出聊天', '退出对话', '不聊了', '先这样吧', '聊到这',
+    '下次再聊', '回头聊', '晚安', '去忙了', '我要忙了', '挂了吧', '回见',
+  ]
 
   get isRunning(): boolean {
     return this.running
@@ -135,15 +149,18 @@ export class VoicePipeline {
       await this._connectWs()
       await this._initVad()
       this.onState?.('listening')
+      this._armIdleTimer()
     } catch (err) {
       console.error('[voice] 进对话失败，回待机', err)
       this.conversationStarted = false
+      this._clearIdleTimer()
       this.onState?.('idle')
     }
   }
 
   /** 回到待机（只监听唤醒，切断后端会话） */
   private _backToWake(): void {
+    this._clearIdleTimer()
     if (this.vad) { try { this.vad.destroy() } catch { /* ignore */ } this.vad = null }
     this._closeWs()
     this.conversationStarted = false
@@ -152,6 +169,28 @@ export class VoicePipeline {
 
   private _closeWs(): void {
     if (this.ws) { try { this.ws.close() } catch { /* ignore */ } this.ws = null }
+  }
+
+  /** 对话空闲计时：有语音/回复进展就续期；超时回待机（仅对话态 & 唤醒模式）。 */
+  private _armIdleTimer(): void {
+    if (!this.wakeWordOn || !this.conversationStarted) return
+    if (this.idleTimer) clearTimeout(this.idleTimer)
+    this.idleTimer = setTimeout(() => {
+      this.idleTimer = null
+      console.log('[voice] 对话空闲超时，回到待机')
+      if (this.wakeWordOn && this.conversationStarted) this._backToWake()
+    }, this.conversationIdleMs)
+  }
+
+  private _clearIdleTimer(): void {
+    if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null }
+  }
+
+  /** 用户说法是否命中退出规则（口语退出对话，不退出前端）。 */
+  private _isExitText(text: string): boolean {
+    const t = (text || '').replace(/\s+/g, '')
+    if (!t) return false
+    return this.EXIT_WORDS.some((w) => t.includes(w.replace(/\s+/g, '')))
   }
 
   /** 统一音频帧分配：待机喂主进程 KWS（IPC），对话中喂后端 */
@@ -231,33 +270,45 @@ export class VoicePipeline {
   /** 后端 JSON 控制消息（真实后端 8001 协议） */
   private _onJson(msg: any): void {
     switch (msg.type) {
-      case 'asr_final':
-        if (msg.text) this.onUserText?.(msg.text)
+      case 'asr_final': {
+        const text = (msg.text ?? '').trim()
+        if (text) {
+          // 口语退出对话（不是退出前端）：命中即回待机
+          if (this._isExitText(text)) {
+            console.log('[voice] 收到退出语，回到待机:', text)
+            if (this.wakeWordOn) this._backToWake()
+            else this.onState?.('listening')
+            break
+          }
+          this.onUserText?.(text)
+          this._armIdleTimer() // 用户说完一句话 → 刷新对话空闲窗口
+        }
         break
+      }
       case 'reply':
         this.resetPlayback() // 新一段回复开始，重置播放时间线
         this.onReply?.(msg.text ?? '', false)
         this.onState?.('speaking')
+        this._armIdleTimer()
         break
       case 'reply_append':
         this.onReply?.(msg.text ?? '', true)
+        this._armIdleTimer()
         break
       case 'tts_start':
         this.resetPlayback()
         this.onTtsEvent?.('start')
         this.onState?.('speaking')
+        this._armIdleTimer()
         break
       case 'tts_end':
         this.onTtsEvent?.('end')
         break
       case 'reply_end':
         this.onTtsEvent?.('end')
-        // 唤醒模式：一轮对话说完 → 回到待机（只监听唤醒词）
-        if (this.wakeWordOn) {
-          this._backToWake()
-        } else {
-          this.onState?.('listening')
-        }
+        // 方案 A：一轮说完仍保持对话（可连续聊），由空闲超时/退出语回待机
+        this.onState?.('listening')
+        this._armIdleTimer()
         break
       case 'ready':
       case 'asr_partial':
@@ -335,6 +386,7 @@ export class VoicePipeline {
     this.running = false
     this.wakeWordOn = false
     this.conversationStarted = false
+    this._clearIdleTimer()
     this.kwsUnsub?.()
     this.kwsUnsub = null
     if (this.vad) { try { this.vad.destroy() } catch { /* ignore */ } this.vad = null }

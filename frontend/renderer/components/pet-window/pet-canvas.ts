@@ -4,18 +4,15 @@
  * - 画布固定初始化宽高（220×240），任何点击 / 面板开合逻辑**禁止修改**画布尺寸
  * - 不填充底色（无 fillRect 黑色背景），仅用 clearRect（透明）清除，
  *   非图形区域像素保持 alpha=0（全透明）
- * - 素材替换接口：PetFrameSource.draw —— 当前为真实宠物照片（PNG，透明背景），
- *   绘制时保持透明；后续可替换为 PNG 序列帧 / 视频帧绘制（接口不变，
- *   画布透明属性与 DOM 盒子保持不变）
- * - 宠物精灵尺寸由图片实际尺寸动态计算（缩放适配画布，底部居中），
- *   面板定位（getBallRect）读取同一事实源，保证锚点与绘制一致
+ * - 素材替换接口：PetFrameSource.draw —— 当前为真实宠物照片（PNG 透明背景）。
  */
+import { PetAnimator } from './anim/PetAnimator'
 
-/** 画布固定尺寸（与宠物窗口初始尺寸一致） */
-export const PET_CANVAS_SIZE = { width: 220, height: 240 } as const
+/** 画布固定尺寸（与宠物窗口初始尺寸一致；高度 280 以留出底部消息条空间） */
+export const PET_CANVAS_SIZE = { width: 220, height: 280 } as const
 
-/** 球体底部留白（与绘制和面板定位共用，保持单一事实源） */
-export const BALL_BOTTOM_PADDING = 8
+/** 宠物底部留白（与绘制和面板定位共用；值 = 消息条30px间距 + 消息条30px高 + 余量） */
+export const BALL_BOTTOM_PADDING = 68
 
 /** 宠物精灵显示尺寸（图片加载后按比例缩放计算，默认占位 128×128） */
 let petSpriteSize = { width: 128, height: 128 }
@@ -86,8 +83,21 @@ export const photoFrameSource: PetFrameSource = {
  * @param imageUrl 宠物照片 URL（透明 PNG）；缺省时使用程序化球体兜底
  */
 export function initPetCanvas(canvas: HTMLCanvasElement, imageUrl?: string): void {
+  // 画布尺寸双保险锁死（逻辑分辨率 + CSS 显示尺寸同为固定 220×240）：
+  // - canvas.width/height：逻辑分辨率（决定绘制的像素网格）
+  // - canvas.style.width/height：显示尺寸（CSS 盒模型），显式写死，防止任何
+  //   Tailwind / 全局样式 / 环境把显示盒撑大 → 内容被拉长/偏移/“容器变大”。
+  // 二者必须一致。此后任何代码都【禁止】再修改这两个值
+  // （宠物窗口尺寸恒定，对话面板已独立成窗口，canvas 无需任何 left/top 补偿）。
   canvas.width = PET_CANVAS_SIZE.width
   canvas.height = PET_CANVAS_SIZE.height
+  canvas.style.width = `${PET_CANVAS_SIZE.width}px`
+  canvas.style.height = `${PET_CANVAS_SIZE.height}px`
+  // 诊断：启动时打印画布逻辑/显示尺寸，便于 devtools 核对（拖拽后若此处尺寸变了，
+  // 说明有外部代码在改 canvas 尺寸——当前源码无此路径，阿里排查“容器被撑大”）。
+  console.log(
+    `[pet-canvas] init lock size attr=(${canvas.width}x${canvas.height}) css=(${canvas.style.width}x${canvas.style.height})`
+  )
   const ctx = canvas.getContext('2d')
   if (!ctx) return
 
@@ -141,4 +151,31 @@ export function getBallTopLeftInCanvas(): { x: number; y: number } {
     x: c.x - petSpriteSize.width / 2,
     y: c.y - petSpriteSize.height / 2
   }
+}
+
+/**
+ * 启动宠物动画：加载背景照片（供程序化兜底），创建并启动 PetAnimator。
+ * 动画播放器优先播放「PNG 多帧素材」（懒加载），未就绪时用程序化形变（呼吸/摆动）兜底。
+ * 画布尺寸维持 220×280 锁定。
+ * @param imageUrl 宠物照片 URL（透明 PNG；缺省时无照片，兜底以占位球体/程序化呈现）
+ * @returns 已启动的 PetAnimator 实例（调用方负责 stop）
+ */
+export function startPetAnimation(canvas: HTMLCanvasElement, imageUrl?: string): PetAnimator {
+  canvas.width = PET_CANVAS_SIZE.width
+  canvas.height = PET_CANVAS_SIZE.height
+  canvas.style.width = `${PET_CANVAS_SIZE.width}px`
+  canvas.style.height = `${PET_CANVAS_SIZE.height}px`
+
+  const animator = new PetAnimator(canvas)
+  if (imageUrl) {
+    const img = new Image()
+    img.onload = () => {
+      petImage = img
+      petSpriteSize = { width: PET_CANVAS_SIZE.width - 4, height: PET_CANVAS_SIZE.height - 4 }
+      animator.setBaseImage(img)
+    }
+    img.src = imageUrl
+  }
+  animator.start()
+  return animator
 }

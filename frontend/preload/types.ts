@@ -25,10 +25,11 @@ export const IPC_CH = {
   dragMove: 'pet:drag-move',
   dragEnd: 'pet:drag-end',
 
-  // 悬浮设置面板窗口尺寸：渲染进程 → 主进程（invoke）
-  // 面板 350×550 挂 document.body，220×240 窗口容纳不下：
-  // 打开面板时窗口扩展至容纳「球体 + 右侧面板」，关闭时恢复
-  panelHeight: 'panel:height',
+  // 独立对话面板窗口：渲染进程 → 主进程（send）
+  // 面板独立成透明窗口（350×550），由宠物窗口位置定位；宠物窗口尺寸恒定、
+  // canvas 无需补偿。打开/关闭不影响宠物窗口本身。
+  chatPanelOpen: 'chat-panel:open',
+  chatPanelClose: 'chat-panel:close',
 
   // 宠物可见性：渲染进程 → 主进程（隐藏/显示球体）
   petVisibleSet: 'pet:set-visible',
@@ -47,7 +48,21 @@ export const IPC_CH = {
   // 唤醒词（KWS）：渲染进程 → 主进程（喂 16k 浮点音频帧；主进程 sherpa-onnx-node 推理）
   kwsFeed: 'kws:feed',
   // 唤醒命中：主进程 → 渲染进程（广播 keyword，渲染进程据此进对话）
-  kwsWake: 'kws:wake'
+  kwsWake: 'kws:wake',
+
+  // 语音播报预览（宠物窗口底部消息条）：
+  // 对话面板(chat) → 主进程：推送一条实时语音播报文本（invoke，落地广播）
+  voicePreviewPush: 'voice-preview:push',
+  // 主进程 → 宠物窗口：广播最新语音播报文本（宠物底部消息条滚动显示）
+  voicePreview: 'voice-preview',
+  // 宠物窗口 → 主进程：读取最近一次语音播报文本（挂载回放用）
+  voicePreviewGet: 'voice-preview:get',
+
+  // 宠物动画状态联动：
+  // 对话面板(chat) → 主进程：通知宠物进入 'speaking' / 'idle'（说话开始/结束）
+  petAnim: 'pet-anim',
+  // 主进程 → 宠物窗口：广播最新动画状态
+  petAnimChanged: 'pet-anim:changed'
 } as const
 
 /** 全局工作模式 */
@@ -90,18 +105,12 @@ export interface AppApi {
   dragEnd(): void
 
   /**
-   * 调整上下文对话面板所需窗口尺寸（面板 350×550 挂 document.body，
-   * 窗口 578×798 扩展容纳「球体 + 面板」；传 0 恢复 220×240）
-   * @param panelHeight    面板高度（0 = 关闭）
-   * @param ballScreen     球体屏幕坐标（保持球体屏幕位置不变）
-   * @param ballInCanvas   球体在画布内的左上角坐标（精灵尺寸变化时锚点自适应）
-   * @returns 实际窗口位置（渲染进程据此补偿 canvas 位置，球体屏幕位置恒定）
+   * 打开独立对话面板窗口（350×550 透明窗口，由宠物窗口位置定位，
+   * 位于宠物左侧，空间不足切右侧）。不影响宠物窗口尺寸/位置。
    */
-  setPanelHeight(
-    panelHeight: number,
-    ballScreen?: { x: number; y: number },
-    ballInCanvas?: { x: number; y: number }
-  ): Promise<{ x: number; y: number } | undefined>
+  openChatPanel(): void
+  /** 关闭（隐藏）独立对话面板窗口；不影响宠物窗口。 */
+  closeChatPanel(): void
 
   /** 设置宠物（球体）可见性（false = 隐藏，只能从控制面板重新开启） */
   setPetVisible(visible: boolean): void
@@ -122,4 +131,22 @@ export interface AppApi {
   kwsFeed(frame: Float32Array): void
   /** 订阅主进程唤醒命中广播（KWS 命中 keyword），返回取消订阅函数 */
   onKwsWake(callback: (keyword: string) => void): () => void
+
+  /**
+   * 推送一条实时语音播报文本（对话面板调用 → 主进程广播到宠物窗口底部消息条）。
+   * @param text 一段语音播报文本（空串则清空当前预览）
+   */
+  pushVoicePreview(text: string): void
+  /** 订阅语音播报文本广播（宠物窗口底部消息条接收），返回取消订阅函数 */
+  onVoicePreview(callback: (text: string) => void): () => void
+  /** 读取最近一次语音播报文本（宠物窗口底部消息条挂载回放） */
+  getVoicePreview(): Promise<string>
+
+  /**
+   * 通知宠物进入动画状态（对话面板说话开始/结束调用）。
+   * @param state 'speaking' | 'idle'
+   */
+  setPetAnim(state: 'speaking' | 'idle'): void
+  /** 订阅宠物动画状态广播（宠物窗口接收），返回取消订阅函数 */
+  onPetAnimChanged(callback: (state: 'speaking' | 'idle') => void): () => void
 }

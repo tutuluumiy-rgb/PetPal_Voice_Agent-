@@ -1,7 +1,8 @@
 # 占位音频 + 唤醒词（KWS）方案
 
 > 记录占位音频（Placeholder）设计与唤醒词（KWS）方案，供前端 Agent 开发 Electron 与后续扩展参考。
-> 相关资源：`testboard/audio/placeholders/*.wav`（占位音频，测试看板下）；生成脚本 `backend/scripts/gen_placeholders.py`。
+> 相关资源：`frontend/renderer/public/placeholders/*.wav`（占位音频，已迁到前端 renderer 静态资源）；
+> 生成脚本 `backend/scripts/gen_placeholders.py`；前端播放契约见 `frontend/docs/占位音频契约.md`。
 
 ---
 
@@ -9,10 +10,10 @@
 
 ### 1.1 架构原则（前后端解耦）
 
-- **占位音频放前端**：资源在 `testboard/audio/placeholders/`（测试看板，Electron 阶段可整体挪到 frontend/），由前端本地播放。
-- **播放控制权在前端**：什么时候播、播哪条、重复几次，均由前端自判（前端自维护计时器与状态）。
+- **占位音频放前端**：资源在 `frontend/renderer/public/placeholders/`（renderer 同源静态资源，前端本地播放），**不再依赖 testboard**。
+- **播放控制权在前端**：什么时候播、播哪条、重复几次，均由前端自判（前端自维护计时器与状态）；前端按 `frontend/docs/占位音频契约.md` 实现 `PlaceholderPlayer`。
 - **后端只发「停止播报」事件**：后端一旦开始下发正式回复，发 `stop_placeholder` 事件；前端收到即切断占位并清计时器。
-- **独立音频通道**：占位用独立 `Audio` 对象播放，与后端流式 PCM 播放器（`pcmPlayback`）**完全隔离**，不混音、不共享状态。
+- **独立音频通道**：占位用独立 `Audio` 对象播放，与后端流式 PCM 播放器（`VoicePipeline` 播放时间线）**完全隔离**，不混音、不共享状态。
 
 ### 1.2 资源与文案表
 
@@ -31,7 +32,7 @@
 
 > 文案可增删。增改后重跑 `backend/scripts/gen_placeholders.py` 重新生成 WAV 即可。
 
-### 1.3 前端触发 / 停止逻辑（index.html 已实现）
+### 1.3 前端触发 / 停止逻辑（前端 PlaceholderPlayer 实现，契约见 `frontend/docs/占位音频契约.md`）
 
 **触发（前端自判）**：
 - **等待回复超时**：`onSpeechEnd`（用户说完）→ `startWaitPlaceholder()`：
@@ -46,7 +47,7 @@
 ### 1.4 生成脚本
 
 `backend/scripts/gen_placeholders.py`：用现有 TTS（`providers.get_tts`）把文案合成一次，
-写成 24kHz mono 16bit WAV（纯 Python 加 RIFF 头，无第三方依赖）到 `testboard/audio/placeholders/`。
+写成 24kHz mono 16bit WAV（纯 Python 加 RIFF 头，无第三方依赖）到 `frontend/renderer/public/placeholders/`。
 
 ```powershell
 cd backend

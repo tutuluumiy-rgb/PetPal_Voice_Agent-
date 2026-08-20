@@ -1,55 +1,64 @@
 /**
- * 窗口管理：悬浮宠物主窗口 + 独立控制面板窗口
+ * 窗口管理：悬浮宠物窗口 + 独立对话面板窗口 + 独立控制面板窗口
  * --------------------------------------------------------------------------
- * - 宠物窗口：220×240，透明 / 无边框 / 置顶 / 不可缩放，可自由拖拽；
- * - 控制面板：800×620，可缩放，非模态，可与宠物窗口同时存在；
- * - 两个窗口使用独立 HTML 入口（renderer/pet.html / renderer/panel.html）。
+ * 分层（两个图层，彻底解耦）：
+ * - 宠物窗口：220×240，透明 / 无边框 / 置顶 / 不可缩放，可自由拖拽。
+ *   窗口尺寸【恒定不变】，画布也从不需要 left/top 补偿（问题1/2的根源消除）。
+ * - 对话面板窗口：350×550，透明 / 无边框 / 置顶 / 非模态，独立于宠物窗口，
+ *   由宠物窗口位置定位（默认宠物左侧，空间不足切右侧），不影响宠物窗口本身。
+ * - 控制面板：800×620，可缩放，非模态。
  */
 import { BrowserWindow, screen, shell } from 'electron'
 import { join } from 'path'
 
-/** 悬浮宠物窗口初始尺寸 */
-export const PET_WINDOW_SIZE = { width: 220, height: 240 } as const
+/** 悬浮宠物窗口尺寸（恒定） */
+export const PET_WINDOW_SIZE = { width: 220, height: 280 } as const
 
-/** 上下文对话面板固定尺寸（宽 350 × 高 550） */
-export const PANEL_SIZE = { width: 350, height: 550 } as const
-
-/**
- * 面板打开时窗口扩展尺寸（宠物 canvas 220×240 + 8px 间距 + 面板 350×550）：
- * - 宽 = 220 + 8 + 350 = 578（面板固定宠物左侧并排）
- * - 高 = 面板 550 + 上下安全边距 8+8 = 566（面板垂直居中对齐宠物中心）
- * 宠物在窗口内的位置由渲染进程上报的「宠物在画布内偏移」决定（精灵尺寸
- * 变化时自适应），窗口位置随之定位，保证宠物屏幕位置恒定（宠物不动）
- */
-const PET_PANEL_WINDOW = { width: 578, height: 566 } as const
-/** 宠物在 canvas 内的位置兜底（canvas 220×240，宠物底部居中）：左缘 46、顶缘 104 */
-const BALL_IN_CANVAS = { left: 46, top: 104 }
+/** 独立对话面板窗口尺寸 */
+export const CHAT_PANEL_SIZE = { width: 350, height: 550 } as const
 
 /** 控制面板窗口初始尺寸 */
 export const PANEL_WINDOW_SIZE = { width: 800, height: 620 } as const
 
-let petWindow: BrowserWindow | null = null
-let panelWindow: BrowserWindow | null = null
-/** 面板打开前的宠物窗口位置（关闭时恢复，保证球体屏幕位置不变） */
-let petWindowPrevPos: { x: number; y: number } | null = null
+// 宠物在画布内的默认左上角偏移（canvas 220×280，宠物约 199×199 底部居中 → 左缘≈10、顶缘≈33）
+const BALL_IN_CANVAS = { left: 10, top: 13 }
+/** 宠物精灵默认尺寸（占位；与 pet-canvas.ts 的默认一致） */
+const PET_SPRITE_DEFAULT = { width: 128, height: 128 }
 
-/** 面板固定宠物左侧：窗口左移「面板宽 350 + 间距 8 = 358」露出面板空间 */
-const PANEL_LEFT_SHIFT = 358
+let petWindow: BrowserWindow | null = null
+let chatWindow: BrowserWindow | null = null
+let panelWindow: BrowserWindow | null = null
+
+/** 防止 enforceLockedSize 在 setSize 触发的 resize 事件里重入 */
+let _forceResizing = false
 
 /**
- * 面板打开状态下拖拽移动窗口时，更新恢复锚点为"拖拽后宠物所对应的窗口位置"。
- * 面板打开时窗口比关闭时左移 358px（宠物在窗口右侧、面板在左）：
- * 关闭面板（canvas 归位后宠物回到窗口左侧 46）时若要宠物停在拖拽后的位置，
- * 恢复锚点 x 需加回这 358px 偏移（y 不变）。
+ * 强制把窗口尺寸扳回锁定值。
+ * 背景：Windows 下透明(transparent)无边框窗口在 setPosition/移动时，Chromium 合成器
+ * 会把窗口尺寸重算并逐次累积（491×620…持续膨胀，日志 `[pet:resize]` +1~+2）。
+ * setMinimumSize/maximumSize 对透明窗口可能被绕过，故用代码在 resize 事件里强制扳回，
+ * 用 setSize 把任何偏离拉回锁定尺寸（对抗系统漂移，根治累积放大）。
  */
-export function updatePetWindowPrevPos(x: number, y: number): void {
-  if (petWindowPrevPos) {
-    petWindowPrevPos = { x: x + PANEL_LEFT_SHIFT, y }
+function enforceLockedSize(win: BrowserWindow, targetW: number, targetH: number, tag: string): void {
+  if (_forceResizing) return
+  const [w, h] = win.getSize()
+  if (w === targetW && h === targetH) return
+  _forceResizing = true
+  try {
+    // 非 resizable 窗口在 Windows 上 setSize 可能被拒：临时允许再还原
+    win.setResizable(true)
+    win.setSize(targetW, targetH)
+    win.setResizable(false)
+    console.log(`[${tag}:force-resize] ${w}x${h} -> ${targetW}x${targetH}`)
+  } catch (e) {
+    console.log(`[${tag}:force-resize] failed`, e)
+  } finally {
+    _forceResizing = false
   }
 }
 
 /** 加载渲染页面：dev 走 Vite dev server，prod 走 out/renderer 静态文件 */
-function loadRenderer(win: BrowserWindow, page: 'pet.html' | 'panel.html'): void {
+function loadRenderer(win: BrowserWindow, page: 'pet.html' | 'chat.html' | 'panel.html'): void {
   const devUrl = process.env['ELECTRON_RENDERER_URL']
   if (devUrl) {
     win.loadURL(`${devUrl}/${page}`)
@@ -57,6 +66,8 @@ function loadRenderer(win: BrowserWindow, page: 'pet.html' | 'panel.html'): void
     win.loadFile(join(__dirname, `../renderer/${page}`))
   }
 }
+
+// ---------- 宠物窗口（尺寸恒定，永不扩展，canvas 永不补偿） ----------
 
 /** 创建悬浮宠物主窗口 */
 export function createPetWindow(): BrowserWindow {
@@ -70,7 +81,10 @@ export function createPetWindow(): BrowserWindow {
     transparent: true,
     frame: false,
     thickFrame: false,
-    useContentSize: true,
+    // ⚠️ 修复：禁止 useContentSize —— 透明无边框窗口在 Windows 上，
+    // useContentSize 会在每次 setPosition(拖拽)/show 时反复做 outer↔content 换算
+    // 并逐次累积，导致窗口物理尺寸越拖越大（X/Y 同步增长）。去掉后 width/height
+    // 直接作为窗口总尺寸，setPosition 不再触发累积换算，尺寸恒为 220×240。
     alwaysOnTop: true,
     resizable: false,
     maximizable: false,
@@ -79,7 +93,6 @@ export function createPetWindow(): BrowserWindow {
     hasShadow: false,
     skipTaskbar: false,
     backgroundColor: '#00000000',
-    // 禁止窗口内容被系统拖拽选中（配合渲染层 user-select:none）
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
@@ -88,11 +101,25 @@ export function createPetWindow(): BrowserWindow {
     }
   })
 
-  // 防止置顶窗口被任务栏遮挡
   petWindow.setAlwaysOnTop(true, 'floating')
-  // TODO: 后续迭代实现 — 加载用户保存的宠物窗口位置（bounds 持久化）
+  // 硬锁尺寸：min=max=220×240，即使 OS/Electron 想改变也无法超越（治本于累积放大）
+  petWindow.setMinimumSize(PET_WINDOW_SIZE.width, PET_WINDOW_SIZE.height)
+  petWindow.setMaximumSize(PET_WINDOW_SIZE.width, PET_WINDOW_SIZE.height)
 
-  // 外链一律走系统浏览器，不在应用内打开
+  // 诊断 + 强制扳回：监听宠物窗口 resize，一旦系统把尺寸改大就立刻 setSize 扳回锁定位
+  petWindow.on('resize', () => {
+    if (_forceResizing) return
+    const b = petWindow!.getBounds()
+    console.log(`[pet:resize] bounds=(${b.x},${b.y} ${b.width}x${b.height})`)
+    enforceLockedSize(petWindow!, PET_WINDOW_SIZE.width, PET_WINDOW_SIZE.height, 'pet')
+  })
+  petWindow.on('move', () => {
+    const b = petWindow!.getBounds()
+    console.log(`[pet:move] bounds=(${b.x},${b.y} ${b.width}x${b.height})`)
+  })
+  // 修正初始尺寸：transparent 窗口启动即可能漂移到 491×620，创建后立即扳回 220×240
+  enforceLockedSize(petWindow, PET_WINDOW_SIZE.width, PET_WINDOW_SIZE.height, 'pet-init')
+
   petWindow.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url)
     return { action: 'deny' }
@@ -100,12 +127,201 @@ export function createPetWindow(): BrowserWindow {
 
   petWindow.on('closed', () => {
     petWindow = null
-    petWindowPrevPos = null
+    // 宠物窗口关闭连带关闭对话面板
+    closeChatPanel()
   })
 
   loadRenderer(petWindow, 'pet.html')
   return petWindow
 }
+
+/** 读取宠物窗口当前屏幕坐标（未创建返回 undefined） */
+export function getPetWindow(): BrowserWindow | null {
+  return petWindow && !petWindow.isDestroyed() ? petWindow : null
+}
+
+// ---------- 对话面板窗口（独立图层，由宠物窗口位置定位） ----------
+
+/** 宠物精灵在屏幕上的矩形（宠物窗口位置 + 画布内偏移；canvas 恒在 0,0，无需补偿） */
+function getPetScreenRect(): { left: number; top: number; width: number; height: number } | null {
+  const win = getPetWindow()
+  if (!win) return null
+  const [px, py] = win.getPosition()
+  return {
+    left: px + BALL_IN_CANVAS.left,
+    top: py + BALL_IN_CANVAS.top,
+    width: PET_SPRITE_DEFAULT.width,
+    height: PET_SPRITE_DEFAULT.height
+  }
+}
+
+/** 创建（或聚焦）独立对话面板窗口 */
+export function createChatWindow(): BrowserWindow {
+  if (chatWindow && !chatWindow.isDestroyed()) {
+    return chatWindow
+  }
+  chatWindow = new BrowserWindow({
+    ...CHAT_PANEL_SIZE,
+    transparent: true,
+    frame: false,
+    thickFrame: false,
+    // ⚠️ 修复：禁止 useContentSize —— 同上，透明无边框固定的对话面板窗口，
+    // useContentSize 会在每次 show/setPosition 时累积放大窗口物理尺寸。
+    alwaysOnTop: true,
+    resizable: false,
+    maximizable: false,
+    minimizable: false,
+    fullscreenable: false,
+    hasShadow: false,
+    skipTaskbar: false,
+    show: false, // 打开时再按位置显示
+    backgroundColor: '#00000000',
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false
+    }
+  })
+  chatWindow.setAlwaysOnTop(true, 'floating')
+  // 硬锁尺寸：min=max=350×550，杜绝任何累积放大
+  chatWindow.setMinimumSize(CHAT_PANEL_SIZE.width, CHAT_PANEL_SIZE.height)
+  chatWindow.setMaximumSize(CHAT_PANEL_SIZE.width, CHAT_PANEL_SIZE.height)
+
+  // 诊断 + 强制扳回：监听对话面板窗口 resize，一旦系统改大就 setSize 扳回锁定位
+  chatWindow.on('resize', () => {
+    if (_forceResizing) return
+    const b = chatWindow!.getBounds()
+    console.log(`[chat:resize] bounds=(${b.x},${b.y} ${b.width}x${b.height})`)
+    enforceLockedSize(chatWindow!, CHAT_PANEL_SIZE.width, CHAT_PANEL_SIZE.height, 'chat')
+  })
+  chatWindow.on('move', () => {
+    const b = chatWindow!.getBounds()
+    console.log(`[chat:move] bounds=(${b.x},${b.y} ${b.width}x${b.height})`)
+  })
+  // 修正初始尺寸
+  enforceLockedSize(chatWindow, CHAT_PANEL_SIZE.width, CHAT_PANEL_SIZE.height, 'chat-init')
+
+  chatWindow.webContents.setWindowOpenHandler(({ url }) => {
+    shell.openExternal(url)
+    return { action: 'deny' }
+  })
+  chatWindow.on('closed', () => {
+    chatWindow = null
+  })
+
+  loadRenderer(chatWindow, 'chat.html')
+  return chatWindow
+}
+
+/**
+ * 对话面板定位：四象限对角规则。
+ * 以宠物中心相对「工作区中心」所在象限决定面板方向，让面板始终出现在宠物对角侧、远离宠物：
+ *   - 宠物在右上(1象限) → 面板放左下角
+ *   - 宠物在左上(2象限) → 面板放右下角
+ *   - 宠物在左下(3象限) → 面板放右上角
+ *   - 宠物在右下(4象限) → 面板放左上角
+ * 即：宠物在上半 → 面板放下方；在下半 → 面板放上方；在右半 → 面板放左侧；在左半 → 面板放右侧。
+ * 全程只动对话窗口自身，宠物窗口不受影响。
+ */
+export function positionChatWindow(): void {
+  const win = chatWindow
+  const pet = getPetScreenRect()
+  if (!win || win.isDestroyed() || !pet) return
+
+  const wa = screen.getDisplayMatching(win.getBounds()).workArea
+  const { width: cw, height: ch } = CHAT_PANEL_SIZE
+
+  const petRight = pet.left + pet.width
+  const petBottom = pet.top + pet.height
+  // 宠物中心
+  const cx = pet.left + pet.width / 2
+  const cy = pet.top + pet.height / 2
+  // 工作区中心
+  const midX = wa.x + wa.width / 2
+  const midY = wa.y + wa.height / 2
+
+  const petAtTop = cy < midY // 宠物在上半（1、2 象限）
+  const petAtRight = cx > midX // 宠物在右半（1、4 象限）
+
+  // 复位距离微调：X 向离宠物距离增大 40px，Y 向减小 100px（要求 2）
+  // 复位距离：X 向离宠物距离（当前基础上 -20），Y 向 -100（要求 2 微调）
+  const GAP_X = 44
+  const GAP_Y = -100
+
+  // X 方向：宠物在右半 → 面板放左侧；左半 → 放右侧
+  const left = petAtRight ? pet.left - cw - GAP_X : petRight + GAP_X
+  // Y 方向：宠物在上半 → 面板放下方；下半 → 放上方（Y 距离减小 100）
+  const top = petAtTop ? petBottom + GAP_Y : pet.top - ch - GAP_Y
+
+  // 兜底 clamp 到工作区（保证面板完整显示）
+  const cl = Math.max(wa.x, Math.min(Math.round(left), wa.x + wa.width - cw))
+  const ct = Math.max(wa.y, Math.min(Math.round(top), wa.y + wa.height - ch))
+
+  win.setPosition(cl, ct)
+  logSizes('position')
+}
+
+/** 宠物拖拽时若对话面板开着，跟随重定位 */
+export function repositionChatAfterPetDrag(): void {
+  if (chatWindow && !chatWindow.isDestroyed() && chatWindow.isVisible()) {
+    positionChatWindow()
+  }
+}
+
+/** 对话面板关闭时由渲染进程自身触发（点 × / ESC / 外点） */
+export function requestCloseChatPanel(): void {
+  closeChatPanel()
+}
+
+// ---------- 诊断：打印各窗口真实物理尺寸（排查"拖拽/右键后窗口放大"） ----------
+/** 打印当前窗口尺寸，用于 devtools 确认窗口物理尺寸是否在异常变化 */
+function logSizes(tag: string): void {
+  const parts: string[] = []
+  const pet = getPetWindow()
+  if (pet) {
+    const [w, h] = pet.getSize()
+    const [cw, ch] = pet.getContentSize()
+    const [px, py] = pet.getPosition()
+    const dpr = pet.webContents.getZoomFactor()
+    const disp = screen.getDisplayMatching(pet.getBounds())
+    parts.push(`pet(pos=${px},${py} w=${w}h=${h} content=${cw}x${ch} dpr=${dpr} dispScale=${disp.scaleFactor})`)
+  }
+  if (chatWindow && !chatWindow.isDestroyed()) {
+    const vis = chatWindow.isVisible()
+    const [w, h] = chatWindow.getSize()
+    const [cw, ch] = chatWindow.getContentSize()
+    const [px, py] = chatWindow.getPosition()
+    const disp = screen.getDisplayMatching(chatWindow.getBounds())
+    parts.push(`chat(vis=${vis} pos=${px},${py} w=${w}h=${h} content=${cw}x${ch} dispScale=${disp.scaleFactor})`)
+  }
+  console.log(`[win:${tag}] ${parts.join(' ')}`)
+}
+
+export function openChatPanel(): void {
+  const win = createChatWindow()
+  logSizes('open-pre')
+  if (win.isVisible()) {
+    positionChatWindow()
+    win.focus()
+    logSizes('open-already-visible')
+    return
+  }
+  win.showInactive()
+  positionChatWindow()
+  logSizes('open-shown')
+}
+
+/** 关闭对话面板：隐藏（不销毁，便于快速重开）；宠物窗口不受影响 */
+export function closeChatPanel(): void {
+  if (chatWindow && !chatWindow.isDestroyed()) {
+    logSizes('close-pre')
+    chatWindow.hide()
+    logSizes('close-after')
+  }
+}
+
+// ---------- 控制面板窗口（现有，不变） ----------
 
 /** 创建（或聚焦）独立控制面板窗口 */
 export function createPanelWindow(): BrowserWindow {
@@ -120,7 +336,6 @@ export function createPanelWindow(): BrowserWindow {
     minHeight: 540,
     show: false,
     backgroundColor: '#08090a',
-    // 暗黑主题
     autoHideMenuBar: true,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
@@ -130,7 +345,6 @@ export function createPanelWindow(): BrowserWindow {
     }
   })
 
-  // 就绪后再显示，避免白屏闪烁；ready-to-show 兜底 3s 强制显示，防黑屏
   panelWindow.once('ready-to-show', () => {
     const win = panelWindow
     if (win && !win.isDestroyed()) {
@@ -143,7 +357,6 @@ export function createPanelWindow(): BrowserWindow {
     }
   }, 3000)
 
-  // 加载失败打日志，避免静默黑屏
   panelWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription) => {
     console.error(`[panel] did-fail-load ${errorCode} ${errorDescription}`)
   })
@@ -166,134 +379,12 @@ export function openPanelWindow(): void {
   createPanelWindow()
 }
 
-/**
- * 等待宠物窗口一次 resize / move 事件真正触发（窗口物理布局完成）后再返回。
- * - 必须在调用 setSize/setPosition 之前注册监听，避免漏掉同步/紧邻事件；
- * - 首次事件即视为到位（setSize/setPosition 为瞬时操作，无动画），随后
- *   用 getBounds() 读取真实最终 bounds；
- * - 兜底超时：极端情况下事件未触发时最迟 120ms 返回，避免 handler 挂死。
- */
-function waitForWindowSettle(win: BrowserWindow): Promise<void> {
-  return new Promise((resolve) => {
-    let done = false
-    const finish = (): void => {
-      if (done) return
-      done = true
-      cleanup()
-      resolve()
-    }
-    const cleanup = (): void => {
-      win.removeListener('resize', finish)
-      win.removeListener('move', finish)
-      clearTimeout(timer)
-    }
-    win.on('resize', finish)
-    win.on('move', finish)
-    const timer = setTimeout(finish, 120)
-  })
-}
-
-/**
- * 上下文对话面板显示时调整宠物窗口（canvas 220×240 固定不动）
- * - panelHeight > 0：窗口扩展为 578×566（面板固定宠物左侧并排，垂直居中宠物中心）
- * - panelHeight = 0：恢复初始 220×240 及面板打开前窗口位置
- * - 宠物屏幕位置不变：窗口位置 = 宠物屏幕坐标 - 宠物画布内偏移
- *   （宠物偏移由渲染进程上报，精灵尺寸变化时自适应；宠物始终钉在屏幕同一坐标，
- *   面板是独立体系，游离于宠物图片范围之外）
- * - 始终保持窗口完整位于屏幕工作区内
- * - async：setSize/setPosition 后 await 一次 resize/move 事件，等窗口物理布局
- *   真正完成，再把真实 getBounds() 返回给渲染进程（消除"窗口已移动、canvas 未
- *   补偿"的中间态跳动）。右键弹出 / 关闭上下文菜单与普通 panel:height 均走此路径。
- */
-export async function resizePetWindowForPanel(
-  panelHeight: number,
-  ballScreen?: { x: number; y: number },
-  ballInCanvas?: { x: number; y: number }
-): Promise<{ x: number; y: number } | undefined> {
-  if (!petWindow || petWindow.isDestroyed()) return undefined
-  const win = petWindow
-  const open = panelHeight > 0
-  const targetW = open ? PET_PANEL_WINDOW.width : PET_WINDOW_SIZE.width
-  const targetH = open ? PET_PANEL_WINDOW.height : PET_WINDOW_SIZE.height
-
-  const [curX, curY] = win.getPosition()
-  const [curW, curH] = win.getSize()
-  if (targetH === curH && targetW === curW && !open) {
-    return { x: curX, y: curY }
-  }
-
-  // 记录面板打开前的窗口位置（关闭时恢复，球体屏幕位置不变）
-  if (open && !petWindowPrevPos) {
-    petWindowPrevPos = { x: curX, y: curY }
-  }
-
-  // 球体在画布内的左上角坐标（精灵尺寸变化时由渲染进程上报，默认 46,104）
-  const ballInX = ballInCanvas?.x ?? BALL_IN_CANVAS.left
-  const ballInY = ballInCanvas?.y ?? BALL_IN_CANVAS.top
-
-  // 球体屏幕坐标：优先用渲染进程上报（保持球体不动），否则用当前窗口推导
-  const ballScreenX = ballScreen?.x ?? curX + ballInX
-  const ballScreenY = ballScreen?.y ?? curY + ballInY
-
-  // 面板固定宠物左侧：窗口左移「面板宽 350 + 间距 8」露出面板空间
-  // （宠物在窗口内右移，屏幕位置不变；面板窗口内 46~396，宠物 404~568，不重叠）
-
-  // 窗口位置：打开 = 球体屏幕 - 球体画布内偏移 - 面板左移量；关闭 = 恢复打开前位置
-  let newX: number
-  let newY: number
-  if (open) {
-    newX = ballScreenX - ballInX - PANEL_LEFT_SHIFT
-    newY = ballScreenY - ballInY
-  } else {
-    newX = petWindowPrevPos?.x ?? curX
-    newY = petWindowPrevPos?.y ?? curY
-    petWindowPrevPos = null
-  }
-
-  const wa = screen.getDisplayMatching(win.getBounds()).workArea
-  // 边缘兜底：窗口保持在屏幕工作区内
-  if (newX < wa.x) {
-    newX = wa.x
-  }
-  if (newX + targetW > wa.x + wa.width) {
-    newX = wa.x + wa.width - targetW
-  }
-  if (newY < wa.y) {
-    newY = wa.y
-  }
-  if (newY + targetH > wa.y + wa.height) {
-    newY = wa.y + wa.height - targetH
-  }
-
-  // 日志：setBounds 调用时刻（目标值）
-  const targetX = Math.round(newX)
-  const targetY = Math.round(newY)
-  console.log(
-    `[petWin] setBounds call t=${Date.now()} open=${open} target=(${targetX},${targetY} ${targetW}x${targetH})`
-  )
-
-  // 预先注册 resize/move 监听（setSize/setPosition 前，避免漏事件）
-  const settle = waitForWindowSettle(win)
-
-  // 非 resizable 窗口在 Windows 上缩小尺寸可能被系统拒绝：临时允许缩放
-  win.setResizable(true)
-  win.setSize(targetW, targetH)
-  win.setPosition(targetX, targetY)
-  win.setResizable(false)
-
-  // 等窗口物理布局完成（resize/move 事件触发）
-  await settle
-
-  // 读取真实最终 bounds 并返回
-  const [rx, ry] = win.getPosition()
-  console.log(`[petWin] settle t=${Date.now()} actual=(${rx},${ry}) ✔`)
-  return { x: Math.round(rx), y: Math.round(ry) }
-}
-
 /** 退出时清理窗口引用 */
 export function destroyWindows(): void {
   petWindow?.destroy()
+  chatWindow?.destroy()
   panelWindow?.destroy()
   petWindow = null
+  chatWindow = null
   panelWindow = null
 }

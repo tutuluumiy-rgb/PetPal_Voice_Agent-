@@ -5,13 +5,12 @@
  * - 渲染进程 mousemove 全部接收，但只保存目标坐标（不发 IPC）；
  * - 渲染进程 requestAnimationFrame 每帧合并一次目标坐标 → 发一次 dragMove；
  * - 主进程 dragMove 直接 setPosition（Math.round 整数坐标，无亚像素抖动）；
- * - 拖拽位置 clamp 到屏幕工作区内，宠物/窗口不会被拖到屏幕外（Sub-task 3）；
- * - 面板打开时拖拽：更新「恢复锚点」prevPos 为拖拽后位置，
- *   关闭面板时恢复到拖拽后位置而非面板打开前（Sub-task 2，避免瞬移）。
+ * - 拖拽位置 clamp 到屏幕工作区内，宠物/窗口不会被拖到屏幕外。
+ * - 对话面板为「独立可自由移动」的面板：宠物拖拽不再强制跟随面板（面板
+ *   由用户自由拖动，仅在关闭后重新打开时按设计坐标复位，见 windows.ts）。
  */
 import { BrowserWindow, screen } from 'electron'
 import type { DragPoint } from '../preload/types'
-import { updatePetWindowPrevPos } from './windows'
 
 interface DragState {
   window: BrowserWindow
@@ -49,8 +48,6 @@ export function dragMove(point: DragPoint): void {
   y = Math.max(wa.y, Math.min(y, wa.y + wa.height - winH))
 
   win.setPosition(x, y)
-  // 面板打开时更新恢复锚点 → 关闭面板恢复到拖拽后位置（不瞬移回面板打开前）
-  updatePetWindowPrevPos(x, y)
 }
 
 /** 渲染进程 mouseup / window blur：结束拖拽 */

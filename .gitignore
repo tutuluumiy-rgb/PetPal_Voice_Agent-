@@ -24,6 +24,15 @@ Untitled
 # ── 运行时会话数据（含用户说话内容，绝不提交）──
 backend/sessions/
 backend/sessions_*_tmp/
+# 长期记忆库（含用户隐私/偏好，绝不提交；可随时重建）
+backend/memories/
+backend/memories_*_tmp/
+
+# ── 前端会话日志（含对话内容，绝不提交）──
+frontend/docs/session.jsonl
+
+# ── 动画帧源素材目录（已生成副本提交于 renderer/public/pet-anim，勿重复入库）──
+frontend/pictures/
 
 # ── Electron 构建产物（预留）──
 backend/build/
