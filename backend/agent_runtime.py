@@ -164,6 +164,36 @@ async def _stream_final_sentences(stream, t_start):
         yield strip_emotion_tags(buffer), emotion
 
 
+def _split_plain_sentences(text: str):
+    """把完整回复文本按标点切句并剥离情绪标签；yield (sentence, emotion)。
+
+    与 _stream_final_sentences 同一套切句/情绪规则，但输入是完整文本（非流）。
+    用于：非流式已拿到 content 时直接切句输出，避免多发一次流式请求。
+    """
+    buf = text
+    emotion = "平静"
+    m = _EMOTION_RE.search(buf)
+    if m:
+        emotion = m.group(1)
+        buf = buf.replace(m.group(0), "", 1)
+    while True:
+        cut = -1
+        for idx, ch in enumerate(buf):
+            if ch in SENTENCE_ENDS:
+                cut = idx
+                break
+        if cut == -1:
+            break
+        sentence = buf[: cut + 1].strip()
+        buf = buf[cut + 1:]
+        if sentence:
+            yield strip_emotion_tags(sentence), emotion
+        if buf == "":
+            break
+    if buf.strip():
+        yield strip_emotion_tags(buf), emotion
+
+
 def _v2_memory_text(memory_fs, memory_max_tokens):
     """v2 扁平记忆注入文本（MEMORY.md + 昨日日志，预算内）。memory_fs 为 None 或不可用时返回 None。"""
     if memory_fs is None:
@@ -239,6 +269,7 @@ async def run_agent_loop(
     config=None,
     memory_store=None,
     memory_fs=None,
+    timeout: float | None = None,
 ):
     """执行一次完整 run（多 sub_turn 原生 function calling）。
 
@@ -340,19 +371,78 @@ async def run_agent_loop(
         else:
             effective_tools = tools
 
-        kwargs = dict(model=model, messages=messages, temperature=0.9, max_tokens=15000, stream=False)
-        if effective_tools:
-            kwargs["tools"] = effective_tools
+        # ── 3→4) 单流式：一轮只发一个「带工具的流式」请求 ──
+        # 流式过程中正文逐句 cut 出 → yield "reply"（这就是"说话"：第一轮前言与
+        # 最后一轮最终答复都是流式播报，首包快、可打断）；同时累积工具调用 JSON 片段。
+        # 流结束时：有工具调用 → 执行工具进下一轮；否则即为最终答复，收尾。
+        # （废弃旧的"决策非流式 + 回复流式"两次请求：它丢掉第一轮正文、且第二次流式
+        #   偶发空会静默；现在用工具执行前的『前言』即第一轮回复，天然匹配
+        #   「工作模式只要第一轮+最后一轮」的播报约定）
+        stream = await client.chat.completions.create(
+            model=model, messages=messages, temperature=0.9, max_tokens=15000,
+            tools=effective_tools or None, stream=True,
+            timeout=timeout,
+        )
 
-        resp = await client.chat.completions.create(**kwargs)
-        msg = resp.choices[0].message
-        content = msg.content or ""
-        tool_calls = msg.tool_calls
+        streamed_content = ""  # 本轮完整正文（含前言；供历史记录）
+        cutbuf = ""            # 切句缓冲
+        emotion = "平静"
+        emotion_parsed = False
+        # 流式工具调用累积：index -> {"id", "function": {"name", "arguments"}}
+        stream_tools: dict[int, dict] = {}
 
-        if tool_calls:
-            session.add("assistant", content or "", run_id=run_id, sub_turn=sub_turn,
-                        tool_calls=_tool_calls_serializable(tool_calls))
-            normalized = _normalize_tool_calls(tool_calls)
+        async for chunk in stream:
+            choice = chunk.choices[0]
+            delta = choice.delta
+            if delta and getattr(delta, "content", None):
+                streamed_content += delta.content
+                cutbuf += delta.content
+                if not emotion_parsed:
+                    m = _EMOTION_RE.search(cutbuf)
+                    if m:
+                        emotion = m.group(1)
+                        cutbuf = cutbuf.replace(m.group(0), "", 1)
+                        emotion_parsed = True
+                # 逐句切出并播报（与 _stream_final_sentences 同规则）
+                while True:
+                    cut = -1
+                    for i, ch in enumerate(cutbuf):
+                        if ch in SENTENCE_ENDS:
+                            cut = i
+                            break
+                    if cut == -1:
+                        break
+                    sentence = cutbuf[: cut + 1].strip()
+                    cutbuf = cutbuf[cut + 1:]
+                    if sentence:
+                        yield ("reply", strip_emotion_tags(sentence), emotion)
+                    if cutbuf == "":
+                        break
+            if delta and getattr(delta, "tool_calls", None):
+                for tc in delta.tool_calls:
+                    idx = tc.index
+                    entry = stream_tools.setdefault(idx, {"id": None, "function": {"name": "", "arguments": ""}})
+                    if getattr(tc, "id", None):
+                        entry["id"] = tc.id
+                    fn = tc.function
+                    if fn and getattr(fn, "name", None):
+                        entry["function"]["name"] += fn.name
+                    if fn and getattr(fn, "arguments", None):
+                        entry["function"]["arguments"] += fn.arguments
+
+        # 收尾：剩余未切正文照常播报
+        if cutbuf.strip():
+            yield ("reply", strip_emotion_tags(cutbuf), emotion)
+
+        # ── 工具调用？→ 执行并继续下一轮；否则即为最终答复，结束本篇 run ──
+        tools_final = [
+            e for e in stream_tools.values()
+            if e["id"] and e["function"]["name"]
+        ]
+        if tools_final:
+            session.add("assistant", streamed_content or "", run_id=run_id, sub_turn=sub_turn,
+                        tool_calls=_tool_calls_serializable(tools_final))
+            normalized = _normalize_tool_calls(tools_final)
             if not normalized:
                 break
             for cid, name, args in normalized:
@@ -367,14 +457,6 @@ async def run_agent_loop(
                 session.add("tool", result, run_id=run_id, sub_turn=sub_turn, tool_call_id=cid)
             sub_turn += 1
             continue
-
-        # ── 4) 无工具调用 → 最终回复（流式逐句）──
-        stream = await client.chat.completions.create(
-            model=model, messages=messages, temperature=0.9, max_tokens=15000,
-            tools=effective_tools or None, stream=True,
-        )
-        async for sentence, emo in _stream_final_sentences(stream, time.time()):
-            yield ("reply", sentence, emo)
         break
 
     yield ("done", "max_turns" if over_limit else "completed")

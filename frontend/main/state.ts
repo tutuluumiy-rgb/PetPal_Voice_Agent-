@@ -7,7 +7,7 @@
  * - authPolicy：权限策略（完全批准/请求批准）。
  * - petVisible：宠物（球体）可见性（隐藏后只能从控制面板重新开启）。
  */
-import type { AuthPolicy, PetMode } from '../preload/types'
+import type { AuthPolicy, PetMode, Skin } from '../preload/types'
 
 /** 当前全局模式（默认闲聊） */
 let currentMode: PetMode = 'chat'
@@ -15,11 +15,17 @@ let currentMode: PetMode = 'chat'
 /** 当前权限策略（默认请求批准） */
 let authPolicy: AuthPolicy = 'ask'
 
+/** 皮肤主题（默认深色；浅色=白底黑字） */
+let skin: Skin = 'dark'
+
 /** 宠物（球体）可见性（默认可见） */
 let petVisible = true
 
 /** 模式变化订阅器（主进程侧改动 → 广播到渲染进程） */
 const modeListeners = new Set<(mode: PetMode) => void>()
+
+/** 皮肤变化订阅器 */
+const skinListeners = new Set<(skin: Skin) => void>()
 
 /** 宠物可见性订阅器 */
 const visibleListeners = new Set<(visible: boolean) => void>()
@@ -52,6 +58,27 @@ export function getAuthPolicy(): AuthPolicy {
 export function setAuthPolicy(policy: AuthPolicy): void {
   authPolicy = policy
   // TODO: 后续迭代实现 — 权限策略落盘 / 业务生效
+}
+
+// ── 皮肤主题 ──
+
+export function getSkin(): Skin {
+  return skin
+}
+
+export function setSkin(s: Skin): void {
+  if (s !== 'dark' && s !== 'light') return
+  if (s === skin) return
+  skin = s
+  for (const cb of skinListeners) cb(skin)
+}
+
+/** 订阅皮肤变化，返回取消订阅函数 */
+export function onSkinChanged(cb: (skin: Skin) => void): () => void {
+  skinListeners.add(cb)
+  return () => {
+    skinListeners.delete(cb)
+  }
 }
 
 export function isPetVisible(): boolean {

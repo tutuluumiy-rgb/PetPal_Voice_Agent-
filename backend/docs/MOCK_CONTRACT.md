@@ -89,13 +89,30 @@
 ```json
 { "type": "history:list", "id": "h-1", "page": 1, "pageSize": 20, "mode": "chat" }
 → { "type": "history:list:ok", "id": "h-1",
-    "items": [ { "id": "h-1001", "mode": "chat", "time": 1787112257402, "preview": "你好球球" } ],
+    "items": [ { "id": "h-1001", "mode": "chat", "time": 1787112257402, "preview": "你好西西" } ],
     "total": 4, "page": 1 }
 ```
 **搜索** `history:search`：同结构，加 `keyword`：
 ```json
 { "type": "history:search", "id": "h-2", "keyword": "新闻", "page": 1, "pageSize": 20 }
 ```
+
+**详情（run 事件轨迹）`history:detail`**（新增 v1.1）：按 run 拉取有序事件流（控制面板"抽屉展开"用）：
+```json
+{ "type": "history:detail", "id": "h-3", "sessionId": "01ccb25ade8c", "runId": "a1b2c3d4" }
+→ { "type": "history:detail:ok", "id": "h-3", "runId": "a1b2c3d4",
+    "title": "2025-06-18 21:33 在干嘛…",
+    "events": [
+      { "ts": 1787112257.4, "kind": "user", "text": "在干嘛？", "subTurn": 1 },
+      { "ts": 1787112258.1, "kind": "assistant", "text": "[开心]在陪你呀~", "subTurn": 1 },
+      { "ts": 1787112259.0, "kind": "tool", "name": "search", "args": {"query": "天气"}, "subTurn": 2 },
+      { "ts": 1787112260.5, "kind": "tool_result", "name": "search", "text": "…结果摘要…", "subTurn": 2 },
+      { "ts": 1787112261.2, "kind": "assistant", "text": "[平静]查好啦…", "subTurn": 3 }
+    ] }
+```
+- `kind` 枚举：`user | assistant | tool | tool_result | system`；`events` 按 `ts` 升序（时间线）。
+- 真实后端（`/ws/mgmt`）：`history:list` 按 `run_id` 聚合 `backend/sessions/*.jsonl`，
+  `preview` 取该 run **首个 user 内容前 20 字 + …**；`history:detail` 返回该 run 的全部事件。
 
 ### 3.3 人设 / 用户档案（markdown）
 
@@ -161,5 +178,24 @@ python mock_server.py          # 监听 0.0.0.0:9000，endpoint /ws
 
 访问地址：**`ws://127.0.0.1:9000/ws`**（局域网使 IP 用 `0.0.0.0` 绑定的本机 IP）。
 不连真数据库/LLM/TTS，全部假数据，前端可随时重启、无副作用。
+
+## 6. 真实后端管理端点（v1.1）
+
+真实后端（`python main.py`，8001）提供**同一份契约**的管理端点：
+
+```
+ws://127.0.0.1:8001/ws/mgmt
+```
+
+- 与语音端点 `/ws/audio` 并存（同一个 FastAPI 应用、独立路径），**不互扰**。
+- 已实现的域：`auth / ping / mode:get|set / auth:policy:get|set / personality:get|set /
+  user:get|set / voice:settings:get|set / history:list|search|detail`。
+- **真实数据源**：
+  - `personality:*` → `backend/prompts/personality.md`
+  - `user:*` → `backend/users/<ACTIVE_USER>/profile.json`（返回/接收结构化的 `basic/reply_style/likes/dislikes/daily`，不再是 markdown）
+  - `voice:settings:*` → `backend/data/voice_settings.json`（持久化；`voice` 映射进 TTS 语气指令）
+  - `auth:policy:*` → `approval_policy`；`mode:*` → `mode_state`
+  - `history:*` → `backend/sessions/*.jsonl`（按 `run_id` 聚合）
+- **前端网关地址**：环境变量 `PETPAL_MGMT_WS_URL` 覆盖（默认 `ws://127.0.0.1:9000/ws` = Mock；跑真实后端时设 `ws://127.0.0.1:8001/ws/mgmt`）。
 
 联调顺序建议（与交底文档一致）：`auth` → `mode:get` / `chat:send` → `tts:start/end` → `history` → `personality/user` → `voice:settings` → `auth:policy` → `chat:abort`。

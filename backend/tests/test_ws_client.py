@@ -2,8 +2,8 @@
 
 流程：
 1. 连接后端，模拟正常说话（speech_start → 用户话音频 → speech_end）
-2. 等球球开始回复（tts_start）
-3. 球球说话期间模拟用户插话：
+2. 等西西开始回复（tts_start）
+3. 西西说话期间模拟用户插话：
    a. 先发 300ms 插话音频（进后端 speaking_audio_cache，模拟 VAD 触发前的开口）
    b. 发 speech_start + preRoll（开口前 256ms 静音）
    c. 继续发插话音频
@@ -91,7 +91,7 @@ async def main():
         await asyncio.sleep(0.15)
         await ws.send(json.dumps({"type": "speech_end"}))
 
-        # ── 收消息循环：等球球开始播放后触发插话 ──
+        # ── 收消息循环：等西西开始播放后触发插话 ──
         barge_triggered = False
         barge_result = None
         asr_final_text = None      # 正常说话的识别结果
@@ -107,7 +107,7 @@ async def main():
                 break
 
             if isinstance(raw, bytes):
-                continue  # 球球 TTS 音频，忽略
+                continue  # 西西 TTS 音频，忽略
 
             msg = json.loads(raw)
             mtype = msg.get("type")
@@ -123,19 +123,19 @@ async def main():
                     asr_final_text = text
                     print(f"    [ASR最终] {text!r}")
             elif mtype == "reply_start":
-                print("[3] 球球开始回复")
+                print("[3] 西西开始回复")
             elif mtype == "reply":
                 reply_text += msg.get("text", "")
-                print(f"    [球球] {msg.get('text','')}")
+                print(f"    [西西] {msg.get('text','')}")
             elif mtype == "reply_append":
                 reply_text += msg.get("text", "")
-                print(f"    [球球+] {msg.get('text','')}")
+                print(f"    [西西+] {msg.get('text','')}")
             elif mtype == "tts_start":
                 if not barge_triggered:
                     barge_triggered = True
-                    print("[4] 球球开始播放 → 上报 client_play_start（模拟喇叭发声），后端进入 speaking")
+                    print("[4] 西西开始播放 → 上报 client_play_start（模拟喇叭发声），后端进入 speaking")
                     await ws.send(json.dumps({"type": "client_play_start"}))
-                    await asyncio.sleep(0.05)  # 立即插话（在球球第一句 TTS 合成中打断，触发流水线取消）
+                    await asyncio.sleep(0.05)  # 立即插话（在西西第一句 TTS 合成中打断，触发流水线取消）
                     print("[4b] 模拟用户插话：先发「开口前静音+开口后400ms语音」进缓存（VAD触发延迟），再报 speech_start")
                     # a. 开口前 300ms 静音 + 开口后 400ms 语音（进后端缓存，模拟 VAD 触发前用户已开口）
                     lead_in = user_audio[max(0, voice_start - int(SAMPLE_RATE * 0.3 * 2)):voice_start]

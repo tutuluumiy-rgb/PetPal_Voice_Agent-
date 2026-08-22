@@ -15,12 +15,19 @@ const MAX_H = 220
 const message = ref('')
 const textareaRef = ref<HTMLTextAreaElement | null>(null)
 
+/** 模型是否运行中（由父级 ChatPanel 传入，驱动右下角按钮变为"中止"） */
+const props = defineProps<{ running?: boolean; petVisible?: boolean }>()
+
 const emit = defineEmits<{
   (e: 'settings', ev: MouseEvent): void
   (e: 'file'): void
   (e: 'mode-card', ev: MouseEvent): void
   (e: 'auth-card', ev: MouseEvent): void
+  (e: 'skin-card', ev: MouseEvent): void
   (e: 'hide-pet'): void
+  (e: 'quit-app'): void
+  (e: 'send', text: string): void
+  (e: 'abort'): void
 }>()
 
 /** textarea 自适应：高度 auto → 测量 scrollHeight → clamp 120~220 */
@@ -32,28 +39,23 @@ function autoResize(): void {
   el.style.height = `${h}px`
 }
 
-/** 发送：TODO 后续迭代实现 — 走主进程语音/LLM 链路 */
+/** 发送：交给主进程网关 chat:send（流式 delta/done 由 ChatPanel 订阅接收） */
 function send(): void {
-  // TODO: 后续迭代实现 — 发送消息到主进程（WebSocket / LLM），追加到对话历史
   const text = message.value.trim()
   if (!text) return
-  void text
+  emit('send', text)
+  message.value = ''
+  autoResize()
 }
 
-/** 中止：模型运行中支持中止当前生成/TTS（图标为灰色小方块） */
+/** 中止：通知主进程网关 chat:abort */
 function abort(): void {
-  // TODO: 后续迭代实现 — 中止当前 LLM 请求 / TTS 播放
+  emit('abort')
 }
-
-/**
- * 模型是否运行中（驱动右下角发送 icon 变为灰色小方块中止）。
- * TODO: 后续迭代实现 — 由主进程"模型开始/结束"事件驱动本状态
- */
-const isRunning = ref(false)
 
 /** 右下角按钮：运行中 → 中止；否则 → 发送（Enter 键发送） */
 function onSendClick(): void {
-  if (isRunning.value) {
+  if (props.running) {
     abort()
   } else {
     send()
@@ -68,17 +70,17 @@ function addFile(): void {
 </script>
 
 <template>
-  <!-- 输入区域：左右两侧留白 3px，用阴影做层级区分（整体卡片底色统一白色，无背景色块/分割线） -->
+  <!-- 输入区域：左右两侧留白 3px，用阴影做层级区分（底色统一 token，深色/浅色皮肤自适应） -->
   <div class="w-full shrink-0 px-[3px]">
     <div class="flex w-full flex-col rounded-lg shadow-[0_-1px_6px_rgba(0,0,0,0.06)]">
-      <!-- 文本输入框：初始 100px，向上自动放大，最大 220px 内部滚动（底色统一白色） -->
+      <!-- 文本输入框：初始 100px，向上自动放大，最大 220px 内部滚动 -->
       <div class="relative">
         <textarea
           ref="textareaRef"
           v-model="message"
           rows="4"
           placeholder="输入消息…"
-          class="w-full resize-none overflow-y-auto rounded-lg border border-black/[0.06] bg-white px-3 pb-8 pt-2 pr-10 text-[13px] leading-5 text-[#1a1a1a] placeholder:text-black/35 outline-none transition-colors duration-200 ease-expo-out focus:border-accent/70"
+          class="w-full resize-none overflow-y-auto rounded-lg border border-line-subtle bg-surface-1 px-3 pb-8 pt-2 pr-10 text-[13px] leading-5 text-fg-primary placeholder:text-fg-muted outline-none transition-colors duration-200 ease-expo-out focus:border-accent/70"
           :style="{ height: `${MIN_H}px`, maxHeight: `${MAX_H}px` }"
           @input="autoResize"
           @keydown.enter.exact.prevent="onSendClick"
@@ -89,16 +91,16 @@ function addFile(): void {
           type="button"
           class="absolute bottom-2 right-2 flex h-7 w-7 items-center justify-center rounded-full transition-all duration-200 ease-expo-out"
           :class="
-            isRunning
-              ? 'bg-black/[0.12] text-[#9a9a9a] hover:bg-black/[0.2]'
-              : 'bg-accent text-white hover:bg-accent-hover active:brightness-95 disabled:opacity-40'
+            running
+              ? 'bg-surface-3 text-fg-secondary hover:bg-surface-3'
+              : 'bg-accent text-fg-inverse hover:bg-accent-hover active:brightness-95 disabled:opacity-40'
           "
-          :title="isRunning ? '中止' : '发送（Enter）'"
-          :disabled="!isRunning && !message.trim()"
+          :title="running ? '中止' : '发送（Enter）'"
+          :disabled="!running && !message.trim()"
           @click="onSendClick"
         >
           <!-- 运行中：灰色小方块（中止） -->
-          <svg v-if="isRunning" width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+          <svg v-if="running" width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
             <rect x="2" y="2" width="8" height="8" rx="1" fill="currentColor" />
           </svg>
           <!-- 发送：向上箭头 -->
@@ -115,7 +117,7 @@ function addFile(): void {
           <!-- 设置（齿轮，线条风格细线图标）→ 打开独立控制面板 -->
           <button
             type="button"
-            class="flex h-6 w-6 items-center justify-center rounded-md text-[#6b6b6b] transition-colors duration-200 ease-expo-out hover:bg-black/[0.05] hover:text-[#1a1a1a] active:bg-black/[0.08]"
+            class="flex h-6 w-6 items-center justify-center rounded-md text-fg-secondary transition-colors duration-200 ease-expo-out hover:bg-surface-2 hover:text-fg-primary active:bg-surface-3"
             title="设置"
             @click="emit('settings', $event)"
           >
@@ -137,7 +139,7 @@ function addFile(): void {
         <!-- 文件（+） -->
         <button
           type="button"
-          class="flex h-6 w-6 items-center justify-center rounded-md text-[#6b6b6b] transition-colors duration-200 ease-expo-out hover:bg-black/[0.05] hover:text-[#1a1a1a] active:bg-black/[0.08]"
+          class="flex h-6 w-6 items-center justify-center rounded-md text-fg-secondary transition-colors duration-200 ease-expo-out hover:bg-surface-2 hover:text-fg-primary active:bg-surface-3"
           title="添加文件"
           @click="addFile"
         >
@@ -149,7 +151,7 @@ function addFile(): void {
         <!-- 模式切换（弹出小卡片） -->
         <button
           type="button"
-          class="flex h-6 w-6 items-center justify-center rounded-md text-[#6b6b6b] transition-colors duration-200 ease-expo-out hover:bg-black/[0.05] hover:text-[#1a1a1a] active:bg-black/[0.08]"
+          class="flex h-6 w-6 items-center justify-center rounded-md text-fg-secondary transition-colors duration-200 ease-expo-out hover:bg-surface-2 hover:text-fg-primary active:bg-surface-3"
           title="模式切换"
           @click="emit('mode-card', $event)"
         >
@@ -162,7 +164,7 @@ function addFile(): void {
         <!-- 权限（弹出小卡片） -->
         <button
           type="button"
-          class="flex h-6 w-6 items-center justify-center rounded-md text-[#6b6b6b] transition-colors duration-200 ease-expo-out hover:bg-black/[0.05] hover:text-[#1a1a1a] active:bg-black/[0.08]"
+          class="flex h-6 w-6 items-center justify-center rounded-md text-fg-secondary transition-colors duration-200 ease-expo-out hover:bg-surface-2 hover:text-fg-primary active:bg-surface-3"
           title="权限"
           @click="emit('auth-card', $event)"
         >
@@ -171,13 +173,28 @@ function addFile(): void {
             <path d="M8 10V7a4 4 0 0 1 8 0v3" stroke="currentColor" stroke-width="1.8" />
           </svg>
         </button>
+
+        <!-- 皮肤（弹出小卡片；深色/浅色两套主题） -->
+        <button
+          type="button"
+          class="flex h-6 w-6 items-center justify-center rounded-md text-fg-secondary transition-colors duration-200 ease-expo-out hover:bg-surface-2 hover:text-fg-primary active:bg-surface-3"
+          title="皮肤"
+          @click="emit('skin-card', $event)"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36a5.39 5.39 0 0 1-4.4 2.26 5.4 5.4 0 0 1-3.14-9.8A9 9 0 0 0 12 3Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" />
+            <circle cx="7.5" cy="12" r="1" fill="currentColor" />
+            <circle cx="16.5" cy="9" r="1" fill="currentColor" />
+          </svg>
+        </button>
       </div>
 
-      <!-- 最右侧：隐藏宠物 -->
+      <!-- 隐藏宠物开关（左移；右侧新增退出应用） -->
       <button
         type="button"
-        class="flex h-6 w-6 items-center justify-center rounded-md text-[#6b6b6b] transition-colors duration-200 ease-expo-out hover:bg-black/[0.05] hover:text-[#1a1a1a] active:bg-black/[0.08]"
-        title="隐藏宠物（可在控制面板重新开启）"
+        class="flex h-6 w-6 items-center justify-center rounded-md transition-colors duration-200 ease-expo-out"
+        :class="props.petVisible === false ? 'bg-accent/15 text-accent hover:bg-accent/20' : 'text-fg-secondary hover:bg-surface-2 hover:text-fg-primary active:bg-surface-3'"
+        :title="props.petVisible === false ? '显示宠物' : '隐藏宠物'"
         @click="emit('hide-pet')"
       >
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -186,8 +203,21 @@ function addFile(): void {
             stroke="currentColor"
             stroke-width="1.8"
           />
-          <circle cx="12" cy="12" r="2.5" stroke="currentColor" stroke-width="1.8" />
-          <path d="M3 3l18 18" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+          <circle v-if="props.petVisible !== false" cx="12" cy="12" r="2.5" stroke="currentColor" stroke-width="1.8" />
+          <path v-else d="M8 8l8 8M16 8l-8 8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+        </svg>
+      </button>
+
+      <!-- 退出应用 -->
+      <button
+        type="button"
+        class="flex h-6 w-6 items-center justify-center rounded-md text-fg-secondary transition-colors duration-200 ease-expo-out hover:bg-danger/10 hover:text-danger active:bg-danger/15"
+        title="退出应用"
+        @click="emit('quit-app')"
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+          <path d="M16 17l5-5-5-5M21 12H9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
         </svg>
       </button>
       </div>

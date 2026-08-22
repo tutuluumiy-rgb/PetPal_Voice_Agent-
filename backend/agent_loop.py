@@ -27,7 +27,8 @@ DEFAULT_PROGRESS_TEXT = "好的，我来看看~"
 async def run_tool_loop(client, model, messages: list,
                         max_loops: int, on_progress=None, is_cancelled=None,
                         extra_body: dict | None = None,
-                        mode: str | None = None) -> tuple[list, int]:
+                        mode: str | None = None,
+                        timeout: float | None = None) -> tuple[list, int]:
     """执行工具自路由循环，直到 LLM 不再输出工具声明或达到上限。
 
     参数:
@@ -59,6 +60,7 @@ async def run_tool_loop(client, model, messages: list,
             max_tokens=15000,
             stream=False,
             extra_body=extra_body,
+            timeout=timeout,
         )
         content = resp.choices[0].message.content or ""
 

@@ -101,6 +101,8 @@ class OpenAICompatLLM(LLMProvider):
         self.extra_body = extra_body  # 厂商特殊参数（如 DeepSeek 关闭思考）
         # 工具自路由最大循环轮数（配置于 .env，防死循环）
         self.max_loops = int(os.getenv("MAX_AGENT_LOOPS", "6"))
+        # LLM 单次调用超时秒数（配置于 .env LLM_TIMEOUT_S；provider 偶尔挂起时防止整轮卡死）
+        self.timeout = float(os.getenv("LLM_TIMEOUT_S", "45"))
         self.first_token_time = None  # LLM 首字时间（暴露给 main.py 统计）
         self.total_time = None
 
@@ -138,6 +140,7 @@ class OpenAICompatLLM(LLMProvider):
             max_tokens=15000,
             stream=True,
             extra_body=self.extra_body,
+            timeout=self.timeout,
         )
 
         async for sentence, emo in self._stream_sentences(stream, t_start):
@@ -186,6 +189,7 @@ class OpenAICompatLLM(LLMProvider):
             is_cancelled=is_cancelled,
             extra_body=self.extra_body,
             mode=mode,
+            timeout=self.timeout,
         )
 
         # ── 最终轮：流式逐句（复用切句 + 情绪解析）──
@@ -200,6 +204,7 @@ class OpenAICompatLLM(LLMProvider):
             max_tokens=15000,
             stream=True,
             extra_body=self.extra_body,
+            timeout=self.timeout,
         )
         async for sentence, emo in self._stream_sentences(stream, t_req):
             if is_cancelled and is_cancelled():

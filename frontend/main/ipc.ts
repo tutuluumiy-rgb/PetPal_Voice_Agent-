@@ -4,33 +4,62 @@
  * 骨架实现：只完成通道注册、参数校验与状态透传；
  * 所有业务逻辑统一以 // TODO: 后续迭代实现 占位。
  */
-import { BrowserWindow, ipcMain } from 'electron'
-import type { AuthPolicy, DragPoint, PetMode } from '../preload/types'
+import { app, BrowserWindow, ipcMain } from 'electron'
+import fs from 'node:fs'
+import path from 'node:path'
+import type { AuthPolicy, DragPoint, PetMode, Skin } from '../preload/types'
 import { IPC_CH } from '../preload/types'
 import { dragStart, dragMove, dragEnd } from './drag'
 import {
-  getAuthPolicy,
-  getMode,
+  getSkin,
   isPetVisible,
   onModeChanged,
   onPetVisibleChanged,
-  setAuthPolicy,
-  setMode,
-  setPetVisible
+  onSkinChanged,
+  setPetVisible,
+  setSkin
 } from './state'
 import { openPanelWindow, openChatPanel, closeChatPanel } from './windows'
+import { backendGateway } from './services/backendGateway'
+
+/** 皮肤偏好落盘路径（userData/skin.json） */
+function skinPrefPath(): string {
+  return path.join(app.getPath('userData'), 'skin.json')
+}
+
+/** 读取皮肤偏好（启动时调用） */
+export function loadSkinPref(): void {
+  try {
+    const raw = fs.readFileSync(skinPrefPath(), 'utf-8')
+    const v = JSON.parse(raw)?.skin
+    if (v === 'dark' || v === 'light') setSkin(v)
+  } catch {
+    /* 无偏好，保持默认 */
+  }
+}
+
+/** 皮肤变化 → 广播 + 落盘 */
+function applySkin(s: Skin): void {
+  setSkin(s)
+  try {
+    fs.writeFileSync(skinPrefPath(), JSON.stringify({ skin: s }), 'utf-8')
+  } catch {
+    /* ignore */
+  }
+}
 
 /** 注册全部 IPC 处理器（app ready 后调用一次） */
 export function registerIpcHandlers(): void {
   // ---------- 模式 ----------
-  ipcMain.handle(IPC_CH.modeGet, (): PetMode => {
-    return getMode()
+  // 读取：网关优先（未连接回退本地），保证 UI 与后端一致
+  ipcMain.handle(IPC_CH.modeGet, async (): Promise<PetMode> => {
+    return backendGateway.modeGet()
   })
 
   ipcMain.on(IPC_CH.modeSwitch, (_event, mode: unknown): void => {
     if (mode !== 'chat' && mode !== 'work') return
-    setMode(mode)
-    // TODO: 后续迭代实现 — 模式切换后的业务逻辑（会话上下文切换等）
+    // 同步本地（立即广播 UI 单选态）+ 通知网关（服务端广播 mode:changed 再回本地，幂等）
+    backendGateway.modeSet(mode)
   })
 
   // 模式变化 → 广播到全部窗口（同步手风琴单选选中态，ASR 语音切换同样走 setMode）
@@ -43,14 +72,13 @@ export function registerIpcHandlers(): void {
   })
 
   // ---------- 权限策略 ----------
-  ipcMain.handle(IPC_CH.authPolicyGet, (): AuthPolicy => {
-    return getAuthPolicy()
+  ipcMain.handle(IPC_CH.authPolicyGet, async (): Promise<AuthPolicy> => {
+    return backendGateway.authPolicyGet()
   })
 
   ipcMain.on(IPC_CH.authPolicySet, (_event, policy: unknown): void => {
     if (policy !== 'full' && policy !== 'ask') return
-    setAuthPolicy(policy)
-    // TODO: 后续迭代实现 — 权限策略业务生效
+    backendGateway.authPolicySet(policy)
   })
 
   // ---------- 窗口 ----------
@@ -136,6 +164,112 @@ export function registerIpcHandlers(): void {
   // ---------- 应用信息 ----------
   ipcMain.handle(IPC_CH.appVersion, (): string => {
     return process.env['npm_package_version'] ?? '0.1.0'
+  })
+
+  // ---------- 后端网关（文本对话 / 历史 / 人设 / 用户 / 语音参数，走 9000 契约） ----------
+  // 连接状态广播由 backendGateway.init() 内部订阅（backend:status）
+
+  // 文本对话：发送（流式事件由主进程广播 chat:running/delta/done/tts:event）
+  ipcMain.on(IPC_CH.chatSend, (_event, payload: unknown): void => {
+    const text = typeof (payload as any)?.text === 'string' ? (payload as any).text : ''
+    const mode: PetMode = (payload as any)?.mode === 'work' ? 'work' : 'chat'
+    if (!text.trim()) return
+    backendGateway
+      .chatSend(mode, text)
+      .catch((err) => console.error('[gw] chat:send 失败:', err))
+  })
+
+  ipcMain.on(IPC_CH.chatAbort, (): void => {
+    backendGateway.chatAbort().catch((err) => console.error('[gw] chat:abort 失败:', err))
+  })
+
+  // 历史记录
+  ipcMain.handle(IPC_CH.historyList, async (_event, payload: unknown): Promise<unknown> => {
+    const page = Math.max(1, Number((payload as any)?.page) || 1)
+    const pageSize = Math.max(1, Number((payload as any)?.pageSize) || 20)
+    const mode = (payload as any)?.mode === 'work' ? 'work' : 'chat'
+    return backendGateway.historyList(page, pageSize, mode)
+  })
+
+  ipcMain.handle(IPC_CH.historySearch, async (_event, payload: unknown): Promise<unknown> => {
+    const keyword = String((payload as any)?.keyword ?? '')
+    const page = Math.max(1, Number((payload as any)?.page) || 1)
+    const pageSize = Math.max(1, Number((payload as any)?.pageSize) || 20)
+    return backendGateway.historySearch(keyword, page, pageSize)
+  })
+
+  // 历史 session 详情（抽屉展开事件轨迹）
+  ipcMain.handle(IPC_CH.historyDetail, async (_event, payload: unknown): Promise<unknown> => {
+    const sessionId = String((payload as any)?.sessionId ?? '')
+    return backendGateway.historyDetail(sessionId)
+  })
+
+  // 人设 / 用户档案
+  ipcMain.handle(IPC_CH.personalityGet, async (): Promise<unknown> => backendGateway.personalityGet())
+  ipcMain.handle(IPC_CH.personalitySet, async (_event, content: unknown): Promise<void> => {
+    await backendGateway.personalitySet(String(content ?? ''))
+  })
+  ipcMain.handle(IPC_CH.userGet, async (): Promise<unknown> => backendGateway.userGet())
+  ipcMain.handle(IPC_CH.userSet, async (_event, profile: unknown): Promise<void> => {
+    await backendGateway.userSet((profile ?? {}) as any)
+  })
+
+  // 语音参数
+  ipcMain.handle(IPC_CH.voiceSettingsGet, async (): Promise<unknown> => backendGateway.voiceSettingsGet())
+  ipcMain.handle(IPC_CH.voiceSettingsSet, async (_event, payload: unknown): Promise<unknown> => {
+    const s = (payload ?? {}) as Record<string, unknown>
+    return backendGateway.voiceSettingsSet({
+      volume: Math.max(0, Math.min(100, Number(s.volume) || 0)),
+      pitch: Math.max(0, Math.min(100, Number(s.pitch) || 0)),
+      voice: (['default', 'cute', 'calm', 'bright'] as const).includes(s.voice as any)
+        ? (s.voice as 'default' | 'cute' | 'calm' | 'bright')
+        : 'default',
+    })
+  })
+
+  // ---------- 宠物动画诊断（渲染进程上报 → 主进程终端日志，排查素材加载/过渡播放） ----------
+  ipcMain.on(IPC_CH.animDebug, (_event, message: unknown): void => {
+    console.log(`[pet-anim] ${String(message ?? '')}`)
+  })
+
+  // ---------- 皮肤主题（主进程状态 + 广播 + 落盘） ----------
+  ipcMain.handle(IPC_CH.skinGet, (): Skin => getSkin())
+  ipcMain.on(IPC_CH.skinSet, (_event, s: unknown): void => {
+    if (s === 'dark' || s === 'light') applySkin(s)
+  })
+  onSkinChanged((s) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) {
+        win.webContents.send(IPC_CH.skinChanged, s)
+      }
+    }
+  })
+
+  // ---------- 语音界面状态（对话面板 → 广播 → 宠物窗口指示灯） ----------
+  ipcMain.on(IPC_CH.voiceState, (_event, payload: unknown): void => {
+    const p = { state: ['off', 'idle', 'listening', 'speaking'].includes((payload as any)?.state)
+      ? (payload as any).state : 'off' }
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) {
+        win.webContents.send(IPC_CH.voiceStateChanged, p)
+      }
+    }
+  })
+
+  // ---------- 新建会话（对话面板发起 → 广播，日志/占位） ----------
+  ipcMain.on(IPC_CH.newSession, (): void => {
+    console.log('[voice] new session requested')
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) {
+        win.webContents.send(IPC_CH.newSession)
+      }
+    }
+  })
+
+  // ---------- 退出应用 ----------
+  ipcMain.on(IPC_CH.appQuit, (): void => {
+    console.log('[app] quit requested')
+    app.quit()
   })
 }
 

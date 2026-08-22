@@ -128,7 +128,7 @@
 ```json
 { "type": "client_barge_in", "latency": 0.312, "preRollBase64": "<base64 PCM 或 null>" }
 ```
-- `latency`：用户开口 → 球球闭嘴的真实打断响应延迟（秒），可 `null`。
+- `latency`：用户开口 → 西西闭嘴的真实打断响应延迟（秒），可 `null`。
 - `preRollBase64`：打断时回退的预卷音频，可为 `null`。
 - 后端取消 TTS/LLM、进入 listening、启动流式 ASR。
 
@@ -201,7 +201,7 @@ ASR 最终识别（用户一句话识别完毕）。
 ```
 
 ### 4.7 `reply_start`
-整段回复开始（前端标记「球球开口」）。
+整段回复开始（前端标记「西西开口」）。
 ```json
 { "type": "reply_start" }
 ```

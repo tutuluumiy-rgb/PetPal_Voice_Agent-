@@ -167,7 +167,7 @@ async def main():
         ("纯静音", make_silence(2000)),
         ("真人声(TTS 正常音量)", voice16),
         ("真人声(AEC削弱 x0.3)", amp_scale(voice16, 0.3)),
-        ("球球回声残留(x0.15)", amp_scale(voice16, 0.15)),
+        ("西西回声残留(x0.15)", amp_scale(voice16, 0.15)),
     ]
 
     print("=" * 76)

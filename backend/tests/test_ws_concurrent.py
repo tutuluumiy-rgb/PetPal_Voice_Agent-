@@ -1,9 +1,9 @@
 """架构修复验证：打断后立即再说话（防重叠）+ 连续打断
 
 场景：
-A. 正常说话 → 球球回复中插话打断 → barge_confirm + 插话识别
-B. 打断识别刚完成，【立即】再说话（不等球球第二轮回复）→ 验证防重叠逻辑
-C. 第二轮球球回复中再次打断 → 连续打断稳定性
+A. 正常说话 → 西西回复中插话打断 → barge_confirm + 插话识别
+B. 打断识别刚完成，【立即】再说话（不等西西第二轮回复）→ 验证防重叠逻辑
+C. 第二轮西西回复中再次打断 → 连续打断稳定性
 
 用法（先启动后端）：
   cd backend
@@ -128,7 +128,7 @@ async def main():
                 text = msg.get("text", "")
                 if phase == "normal_A":
                     results["A"] = text
-                    print(f"    [识别A] {text!r} → 等待球球回复")
+                    print(f"    [识别A] {text!r} → 等待西西回复")
                     phase = "wait_barge1"
                 elif phase == "barge1_done":
                     results["B"] = text
@@ -137,7 +137,7 @@ async def main():
                     await normal_speech("B2")
                 elif phase == "fast_B2":
                     results["B2"] = text
-                    print(f"    [B2识别] {text!r} → 等待球球第三轮回复")
+                    print(f"    [B2识别] {text!r} → 等待西西第三轮回复")
                     phase = "wait_barge2"
                 elif phase == "barge2_done":
                     results["C"] = text
@@ -145,11 +145,11 @@ async def main():
                     phase = "done"
             elif mtype == "tts_start":
                 if phase == "wait_barge1":
-                    print("[1b] 球球播放中 → 插话 B（从二数到十）")
+                    print("[1b] 西西播放中 → 插话 B（从二数到十）")
                     phase = "wait_barge1_confirm"
                     await barge_speech("B")
                 elif phase == "wait_barge2":
-                    print("[2b] 球球第二轮回复中 → 再次插话 C（从四数到十，连续打断）")
+                    print("[2b] 西西第二轮回复中 → 再次插话 C（从四数到十，连续打断）")
                     phase = "wait_barge2_confirm"
                     await barge_speech("C")
             elif mtype == "barge_confirm":

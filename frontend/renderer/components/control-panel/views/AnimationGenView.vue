@@ -27,7 +27,7 @@ async function showPet(): Promise<void> {
 
 <template>
   <div class="flex flex-col gap-4">
-    <PageCard title="宠物动画生成" description="由真实照片生成各状态动画素材（petpack 生成链）">
+    <PageCard title="宠物动画生成" description="用你的照片生成各状态动画素材，让西西动起来">
       <div
         class="flex min-h-40 flex-col items-center justify-center gap-3 rounded-md border border-dashed border-line-strong bg-surface-1/50"
       >

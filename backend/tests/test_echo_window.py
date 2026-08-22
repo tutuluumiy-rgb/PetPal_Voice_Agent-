@@ -1,7 +1,7 @@
-"""验证：降阈值后「纯球球回声」是否会被误判为人声（自打断风险）
+"""验证：降阈值后「纯西西回声」是否会被误判为人声（自打断风险）
 
-场景：球球正在说话（AEC 后残留 x0.15），前端 VAD 误触发 speech_start，
-二次确认取最近 512ms —— 若占比高 → 球球会自己打断自己。
+场景：西西正在说话（AEC 后残留 x0.15），前端 VAD 误触发 speech_start，
+二次确认取最近 512ms —— 若占比高 → 西西会自己打断自己。
 
 用法：
   cd backend
@@ -44,16 +44,16 @@ async def main():
     ball16 = downsample_24k_to_16k(b"".join(chunks))
 
     print("=" * 66)
-    print("纯球球回声（AEC 后残留）二次确认判定")
+    print("纯西西回声（AEC 后残留）二次确认判定")
     print("=" * 66)
-    # 取球球说话的「语音主体」段（中间 1s，避开句首句尾静音）
+    # 取西西说话的「语音主体」段（中间 1s，避开句首句尾静音）
     mid = ball16[len(ball16)//2 : len(ball16)//2 + int(SAMPLE_RATE * 1 * 2)]
     for scale in (0.15, 0.10, 0.05, 0.03):
         echo = amp_scale(mid, scale)
         pre_roll = bytes(bytearray(int(SAMPLE_RATE * 0.256 * 2)))  # 静音预卷
         dec = _confirm_real_speech(bytearray(pre_roll) + bytearray(echo))
         rms = float(np.sqrt(np.mean(np.frombuffer(echo, dtype=np.int16).astype(np.float32) ** 2)))
-        print(f"  球球回声 x{scale:<5} RMS={rms:7.1f} → {'误判人声(会自打断!)' if dec else '正确判噪声 ✓'}")
+        print(f"  西西回声 x{scale:<5} RMS={rms:7.1f} → {'误判人声(会自打断!)' if dec else '正确判噪声 ✓'}")
 
 
 if __name__ == "__main__":

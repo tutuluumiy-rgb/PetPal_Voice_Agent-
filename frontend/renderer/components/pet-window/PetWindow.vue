@@ -11,7 +11,7 @@
  * - 底部消息条：交付占位 + 预留 —— 未来用于滚动播报实时语音文本（经 IPC
  *   voice-preview 由主进程广播喂入），字体与对话面板回复区正文一致。
  */
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { startPetAnimation, PET_CANVAS_SIZE, BALL_BOTTOM_PADDING } from './pet-canvas'
 import type { PetAnimator } from './anim/PetAnimator'
 import petPhotoUrl from '../../assets/pet-photo.png'
@@ -26,9 +26,33 @@ const voiceBarTop = PET_CANVAS_SIZE.height - BALL_BOTTOM_PADDING + VOICE_BAR_GAP
 // ---------- 动画播放器实例（由 startPetAnimation 创建并启动） ----------
 let animator: PetAnimator | null = null
 
-// ---------- 语音播报消息条（底部独立图层，单行滚动播报最新语音） ----------
-// 恒定显示最新一条播报文本，横向滚动播放；点击该条打开上下文对话面板。
+// ---------- 语音播报消息条（底部独立图层，超宽才滚动，否则静态显示） ----------
 const voiceText = ref('') // 最新一条播报文本
+const barBoxRef = ref<HTMLElement | null>(null) // 消息条容器（定宽 200px）
+const barTextRef = ref<HTMLElement | null>(null) // 文本元素（用于测量真实宽度）
+const marqueeOn = ref(false) // 文本宽度超过容器才滚动
+
+/** 测量：文本超宽 → 开滚动；否则静态展示（不改 8s 动画时长，仅控制是否启用） */
+function measureMarquee(): void {
+  void nextTick(() => {
+    const box = barBoxRef.value
+    const txt = barTextRef.value
+    if (!box || !txt) return
+    const over = txt.scrollWidth > box.clientWidth + 1 // +1 容差，避免临界抖动
+    marqueeOn.value = over
+  })
+}
+
+// 文本变化 → 重新测量是否需要滚动
+watch(voiceText, measureMarquee)
+
+// 滚动时长按「语音播报速度」（≈4 字/秒）计算：滚动节奏与说话一致，不再固定 8s
+const SPEECH_CHARS_PER_SEC = 4
+const marqueeDuration = computed(() => {
+  const n = voiceText.value.length
+  if (!n) return 8
+  return Math.max(4, Math.min(30, Math.round(n / SPEECH_CHARS_PER_SEC)))
+})
 
 // ---------- TTS / 语音状态 / 模式 / 可见性 订阅 ----------
 let unsubTtsStart: (() => void) | null = null
@@ -116,10 +140,32 @@ let unsubPetVisible: (() => void) | null = null
 // ---------- 语音播报文本接收 ----------
 let unsubVoicePreview: (() => void) | null = null
 
+// ---------- 皮肤（消息条跟随 token 双主题） ----------
+let unsubSkin: (() => void) | null = null
+
+function applySkinAttr(skin: string): void {
+  document.documentElement.dataset.skin = skin === 'light' ? 'light' : 'dark'
+}
+
+// ---------- 语音界面状态指示灯（圆点） ----------
+// 规则：idle（待机/超时断开）→ 橙色；唤醒后 listening/speaking → 绿色；off（未启用）→ 灰
+let unsubVoiceState: (() => void) | null = null
+const voiceDot = ref<'off' | 'idle' | 'listening' | 'speaking'>('off')
+
+const VOICE_DOT_STYLE: Record<string, { color: string; title: string }> = {
+  off: { color: '#9ca3af', title: '语音未启用' },
+  idle: { color: '#f59e0b', title: '待机中 · 说「你好西西」唤醒' },
+  listening: { color: '#22c55e', title: '正在聆听…' },
+  speaking: { color: '#22c55e', title: '正在回复…' }
+}
+
 onMounted(() => {
   if (canvasRef.value) {
     animator = startPetAnimation(canvasRef.value, petPhotoUrl)
+    // 动画诊断 → 打印到主进程终端（素材就绪状态 / 过渡播放路径），排查"动画不播"
+    animator.onDebug = (msg) => window.api.reportAnimDebug(msg)
   }
+  measureMarquee()
 
   // TTS（主进程预留通道）→ 动画说话态
   unsubTtsStart = window.api.onTtsStart(() => {
@@ -137,16 +183,33 @@ onMounted(() => {
     else animator?.pause()
   })
 
+  // 语音界面状态（对话面板上报 → 主进程广播）→ 消息条指示灯
+  unsubVoiceState = window.api.onVoiceState((p) => {
+    if (p?.state) voiceDot.value = p.state
+  })
+
   // 三窗口语音状态（对话面板说/停）→ 动画
   unsubPetAnim = window.api.onPetAnimChanged((s) => {
+    window.api.reportAnimDebug(`event pet-anim:changed -> ${s}`)
     if (s === 'speaking') animator?.feedTts(true)
     else if (s === 'idle') animator?.feedTts(false)
   })
 
-  // 模式（聊天/工作）→ 动画基底
+  // 模式（聊天/工作）→ 动画基底（模式切换 = 主要"切换动画"触发事件）
   unsubMode = window.api.onModeChanged((mode) => {
+    window.api.reportAnimDebug(`event mode:changed -> ${mode}`)
     animator?.setMode(mode)
   })
+
+  // 皮肤：消息条等 token 组件跟随主进程主题
+  unsubSkin = window.api.onSkinChanged((s) => applySkinAttr(s))
+  window.api.getSkin().then((s) => applySkinAttr(s)).catch(() => undefined)
+
+  // 初始模式同步：宠物窗口启动即对齐当前模式（否则工作模式下会一直播闲聊循环）
+  window.api.getMode().then((mode) => {
+    window.api.reportAnimDebug(`event init mode -> ${mode}`)
+    animator?.setMode(mode)
+  }).catch(() => undefined)
 
   // 实时语音播报：主进程广播 → 消息条单行展示并滚动最新一条
   unsubVoicePreview = window.api.onVoicePreview((text) => {
@@ -178,6 +241,8 @@ onBeforeUnmount(() => {
   unsubVoicePreview?.()
   unsubPetAnim?.()
   unsubMode?.()
+  unsubSkin?.()
+  unsubVoiceState?.()
   if (onVisibilityChange) {
     document.removeEventListener('visibilitychange', onVisibilityChange)
     onVisibilityChange = null
@@ -202,20 +267,31 @@ onBeforeUnmount(() => {
     @contextmenu="onCanvasContextMenu"
   />
 
-  <!-- 底部语音播报消息条（独立图层，固定 30px，横向滚动播报最新语音）：点击打开上下文面板 -->
+  <!-- 底部语音播报消息条（独立图层，固定 30px，超宽才滚动播报最新语音）：点击打开上下文面板 -->
   <div
     v-show="petVisible"
-    class="absolute left-1/2 w-[200px] -translate-x-1/2 cursor-pointer select-none rounded-[8px] bg-white shadow-[0_2px_8px_rgba(0,0,0,0.18)]"
+    class="absolute left-1/2 w-[200px] -translate-x-1/2 cursor-pointer select-none rounded-[8px] bg-surface-1 transition-colors duration-ds-md ease-expo-out shadow-[0_2px_8px_rgba(0,0,0,0.18)]"
     :style="{ top: `${voiceBarTop}px`, height: '30px' }"
     @mousedown.stop
     @contextmenu.prevent
     @click.stop="openContextPanel"
   >
     <div class="flex h-[30px] w-full items-center gap-1.5 overflow-hidden px-2.5">
-      <span class="shrink-0 text-[11px]">🎙</span>
-      <!-- 横向滚动播报最新语音文本 -->
-      <div class="relative h-[30px] min-w-0 flex-1 overflow-hidden">
-        <p class="anim-marquee absolute inset-y-0 left-0 whitespace-nowrap text-[13px] leading-[30px] text-[#333]">
+      <!-- 语音状态指示灯（圆点）：待机/超时断开=橙，唤醒后聆听/回复=绿，未启用=灰 -->
+      <span
+        class="shrink-0 rounded-full transition-colors duration-ds-sm ease-expo-out"
+        :style="{ width: '8px', height: '8px', backgroundColor: VOICE_DOT_STYLE[voiceDot]?.color ?? '#9ca3af' }"
+        :title="VOICE_DOT_STYLE[voiceDot]?.title ?? '语音未启用'"
+      />
+      <!-- 文本超宽才滚动；未超宽静态显示（measureMarquee 测量 scrollWidth vs clientWidth） -->
+      <div ref="barBoxRef" class="relative h-[30px] min-w-0 flex-1 overflow-hidden">
+        <p
+          ref="barTextRef"
+          :key="voiceText"
+          class="absolute inset-y-0 left-0 whitespace-nowrap text-[13px] leading-[30px] text-fg-secondary"
+          :class="marqueeOn ? 'anim-marquee' : ''"
+          :style="marqueeOn ? { animationDuration: `${marqueeDuration}s` } : undefined"
+        >
           {{ voiceText || '语音播报中…' }}
         </p>
       </div>

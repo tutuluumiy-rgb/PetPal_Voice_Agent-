@@ -8,7 +8,7 @@
  *   由宠物窗口位置定位（默认宠物左侧，空间不足切右侧），不影响宠物窗口本身。
  * - 控制面板：800×620，可缩放，非模态。
  */
-import { BrowserWindow, screen, shell } from 'electron'
+import { BrowserWindow, nativeImage, screen, shell } from 'electron'
 import { join } from 'path'
 
 /** 悬浮宠物窗口尺寸（恒定） */
@@ -330,11 +330,21 @@ export function createPanelWindow(): BrowserWindow {
     return panelWindow
   }
 
+  // 标题栏图标：renderer/public/logo.png（dev/prod 均落在 out/renderer/logo.png）
+  let panelIcon: Electron.NativeImage | null = null
+  try {
+    panelIcon = nativeImage.createFromPath(join(__dirname, '../renderer/logo.png'))
+  } catch {
+    panelIcon = null
+  }
+
   panelWindow = new BrowserWindow({
     ...PANEL_WINDOW_SIZE,
     minWidth: 720,
     minHeight: 540,
     show: false,
+    title: 'PetPal 控制面板',
+    icon: panelIcon || undefined,
     backgroundColor: '#08090a',
     autoHideMenuBar: true,
     webPreferences: {

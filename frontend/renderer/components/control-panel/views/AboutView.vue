@@ -5,6 +5,7 @@
  */
 import { onMounted, ref } from 'vue'
 import PageCard from '../PageCard.vue'
+import LogoImg from '../LogoImg.vue'
 
 const version = ref('0.1.0')
 
@@ -21,28 +22,19 @@ onMounted(async () => {
   <div class="flex flex-col gap-4">
     <PageCard title="关于" description="PetPal Voice Agent — 桌面端 AI 语音虚拟形象客户端">
       <div class="flex items-start gap-4">
-        <div
-          class="flex h-16 w-16 shrink-0 items-center justify-center rounded-lg border border-line-subtle bg-accent/15 text-2xl font-semibold text-accent shadow-ds-md"
-        >
-          球
-        </div>
+        <LogoImg :size="64" />
         <div class="flex flex-col gap-1.5">
           <h3 class="text-[15px] font-semibold tracking-ds-tight text-fg-primary">PetPal</h3>
           <p class="font-mono text-[11px] uppercase tracking-widest text-fg-muted">
             PetPal Voice Agent · v{{ version }}
           </p>
-          <p class="max-w-80 text-[12px] leading-5 text-fg-secondary">
-            悬浮桌面宠物 + 语音交互入口。当前为可运行底座：窗口、拖拽、上下文对话面板、控制面板与
-            IPC 桥接已完成，语音链路与动画引擎将在后续迭代接入。
+          <p class="max-w-96 text-[12px] leading-5 text-fg-secondary">
+            悬浮桌面 AI 语音宠物：说「你好西西」唤醒进入闲聊 / 工作双模式对话；
+            WebRTC 消回声 + Silero VAD 支持随时插话打断；四态帧动画（闲聊 / 工作 / 两种切换过渡）。
+            控制面板可查看每次对话的 run 事件轨迹、真实编辑宠物人设、用户档案与语音参数，
+            支持深色 / 浅色双皮肤。
           </p>
         </div>
-      </div>
-
-      <div class="mt-4 flex flex-col gap-1 border-t border-line-subtle pt-3">
-        <p class="font-mono text-[10px] uppercase tracking-widest text-fg-muted">技术栈</p>
-        <p class="text-[12px] leading-5 text-fg-secondary">
-          Electron-Vite · Vue 3 · TypeScript · TailwindCSS · Linear 风格暗黑设计系统
-        </p>
       </div>
     </PageCard>
   </div>

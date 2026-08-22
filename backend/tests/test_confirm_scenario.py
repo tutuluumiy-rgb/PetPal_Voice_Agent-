@@ -1,8 +1,8 @@
 """环节2-场景复现：真实打断时序下 _confirm_real_speech 的判定
 
-模拟球球说话期间用户插话的时序：
-- cache = 球球回声(前) + 用户插话(后)，speech_start 到达时 cache 尾部 = 用户开口后音频
-- preRoll = 用户开口前 256ms（含开口前瞬间，多为静音/球球回声）
+模拟西西说话期间用户插话的时序：
+- cache = 西西回声(前) + 用户插话(后)，speech_start 到达时 cache 尾部 = 用户开口后音频
+- preRoll = 用户开口前 256ms（含开口前瞬间，多为静音/西西回声）
 
 验证两个拼接顺序：
   A. 当前代码：confirm = cache + preRoll（preRoll 拼末尾）→ 最近256ms = 开口前 → 疑似误拒根因
@@ -49,14 +49,14 @@ async def main():
 
     tts = AliyunTTS()
 
-    # 球球回声（AEC 后残留弱化）—— 模拟球球正在说话
+    # 西西回声（AEC 后残留弱化）—— 模拟西西正在说话
     ball = amp_scale(await synth_16k(tts, "一、二、三、四、五、六、七、八、九、十！数完啦！有奖励吗？"), 0.15)
     # 用户插话（AEC 削弱 x0.3）—— 模拟用户开口"从五数到十"
     user = amp_scale(await synth_16k(tts, "从五数到十"), 0.3)
     # 开口前 256ms：静音（用户开口前瞬间）
     pre_roll_silence = bytes(bytearray(int(SAMPLE_RATE * 0.256 * 2)))
 
-    # 模拟时序：球球说了一阵后用户开口，speech_start 到达时：
+    # 模拟时序：西西说了一阵后用户开口，speech_start 到达时：
     # cache 尾部 = 用户插话的开头 ~300ms（VAD延迟+传输延迟内用户继续说的部分）
     # 简化：cache = ball(前) + user(完整) ；preRoll = 开口前256ms静音
     cache = bytearray(ball + user)
@@ -65,7 +65,7 @@ async def main():
     print("=" * 72)
     print("环节2c：真实打断时序下二次确认（阈值 0.45 / 占比 0.05 / 窗口 256ms）")
     print("=" * 72)
-    print(f"  cache: 球球回声 {len(ball)/2/SAMPLE_RATE*1000:.0f}ms + 用户插话 {len(user)/2/SAMPLE_RATE*1000:.0f}ms")
+    print(f"  cache: 西西回声 {len(ball)/2/SAMPLE_RATE*1000:.0f}ms + 用户插话 {len(user)/2/SAMPLE_RATE*1000:.0f}ms")
     print(f"  preRoll: 开口前 256ms（静音）")
 
     # A. 当前代码：cache + preRoll

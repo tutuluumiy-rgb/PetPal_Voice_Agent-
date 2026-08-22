@@ -4,18 +4,16 @@
  * --------------------------------------------------------------------------
  * 运行在独立的透明窗口（350×550）中，由主进程按宠物位置定位（宠物左侧，
  * 空间不足切右侧）。宠物窗口尺寸恒定、canvas 永不补偿 → 打开/关闭本面板
- * 完全不影响宠物状态（两个图层彻底解耦，解决问题1/2）。
+ * 完全不影响宠物状态（两个图层彻底解耦）。
  *
- * 本组件只负责：
- * - 消息区（对话历史）
- * - 输入区（ChatInputBar）+ 语音开关
- * - 模式 / 权限小卡片、设置、隐藏宠物
- * - 语音管线（VoicePipeline：后端 8001 /ws/audio + KWS 唤醒待机）
- *
- * 窗口的显示 / 隐藏 / 定位全部由主进程管理；本组件只发 open/close 通知。
+ * 职责：
+ * - 消息区（对话历史）+ 输入区（ChatInputBar）+ 语音开关
+ * - 模式 / 权限 / 皮肤 小卡片（按钮上方弹出）、设置、隐藏宠物开关
+ * - 语音管线（VoicePipeline：8001 /ws/audio + KWS 唤醒待机）
+ * - 双皮肤（深色默认 / 浅色白底黑字）：html[data-skin] token 切换
  */
 import { onBeforeUnmount, onMounted, ref } from 'vue'
-import type { AuthPolicy, PetMode } from '../../../preload/types'
+import type { AuthPolicy, PetMode, Skin, VoiceUiState } from '../../../preload/types'
 import ChatInputBar from '../pet-window/ChatInputBar.vue'
 import { VoicePipeline } from '../../app/voice/VoicePipeline'
 
@@ -26,21 +24,48 @@ interface ChatMessage {
 }
 
 const messages = ref<ChatMessage[]>([
-  { role: 'pet', text: '你好呀，我是球球！有什么想聊的？' }
+  { role: 'pet', text: '你好呀，我是西西！有什么想聊的？' }
 ])
 
 function pushMessage(role: ChatMessage['role'], text: string): void {
   messages.value = [...messages.value, { role, text }]
 }
 
-// ---------- 语音接入（后端职责提供：连真实后端 8001 /ws/audio + 唤醒词待机） ----------
+// ---------- 语音接入（8001 /ws/audio + 唤醒词待机） ----------
 const wsUrl = 'ws://127.0.0.1:8001/ws/audio'
 const vadBase = '/vad/'
 // 实际可唤词由 KWS 模型词表决定（resources/kws/keywords.txt，默认示例「你好西西」）
 const wakeKeyword = '你好西西'
 let voice: VoicePipeline | null = null
-const listening = ref(false)   // 是否正在语音交互
-const stateLabel = ref('')     // 待机/聆听状态提示
+const listening = ref(false) // 是否正在语音交互
+// 状态提示：待机已取消——空闲即「闲聊模式」状态（唤醒词只是进入对话的开关）
+const stateLabel = ref('')
+
+/** 上报语音界面状态 → 主进程广播 → 宠物窗口消息条指示灯（idle=橙 / 对话=绿 / off=灰） */
+function sendVoiceState(s: VoiceUiState): void {
+  window.api.voiceState({ state: s })
+}
+
+/** 新建会话（UI 侧）：清空消息与文本对话草稿，显示提示 */
+function uiNewSession(): void {
+  messages.value = [{ role: 'pet', text: '好的，我们开启一段新对话吧～（已清空上下文）' }]
+  window.api.pushVoicePreview('')
+  draftIndex = -1
+  running.value = false
+  chatAudioEl?.pause()
+}
+
+/** 头部「新建会话」按钮：UI 清空 + 重连语音后端（后端按连接创建新会话） */
+function newSessionClick(): void {
+  window.api.notifyNewSession()
+  uiNewSession()
+  void voice?.newSession()
+}
+
+/** 退出应用（底部按钮栏最右侧） */
+function quitApp(): void {
+  window.api.quitApp()
+}
 
 async function setMicState(on: boolean, wake = false): Promise<void> {
   try {
@@ -48,34 +73,83 @@ async function setMicState(on: boolean, wake = false): Promise<void> {
       if (!voice) {
         voice = new VoicePipeline({ wsUrl, vadAssetsBase: vadBase })
         voice.onUserText = (text) => {
+          // 新一轮用户发言 → 清空消息条累计
+          barAllText = ''
+          barFirstRound = ''
+          barRoundText = ''
+          barRoundCount = 0
           if (text) pushMessage('user', text)
         }
-        voice.onReply = (text) => {
-          if (text) {
+        // 口语「新建会话」→ UI 清空（重连由 VoicePipeline.newSession() 执行）
+        voice.onNewSession = () => {
+          uiNewSession()
+        }
+        // 语音回复聚合：整段回复（reply + 多个 reply_append）只显示为一个气泡
+        let voiceDraft = -1
+        // 消息条文本累计：聊天=整轮之和；工作=第一轮 + 最新一轮
+        let barAllText = ''
+        let barFirstRound = ''
+        let barRoundText = ''
+        let barRoundCount = 0
+        voice.onReply = (text, append) => {
+          if (!text) return
+          const hasDraft = voiceDraft >= 0 && voiceDraft < messages.value.length
+          if (append && hasDraft) {
+            const cur = messages.value[voiceDraft]
+            messages.value[voiceDraft] = { ...cur, text: cur.text + text }
+          } else {
             pushMessage('pet', text)
-            // 把宠物本次播报的文本同步推给宠物窗口底部消息条（实时语音播报）
-            window.api.pushVoicePreview(text)
+            voiceDraft = messages.value.length - 1
           }
+          if (!append) {
+            barRoundCount += 1
+            if (barRoundCount === 1) barFirstRound = text
+            barRoundText = text
+          } else {
+            barRoundText += text
+          }
+          barAllText += text
+          const barText =
+            currentMode.value === 'work' && barRoundCount > 1
+              ? `${barFirstRound}…${barRoundText}`
+              : barAllText
+          window.api.pushVoicePreview(barText)
+        }
+        voice.onExit = () => {
+          const kw = wakeKeyword || '唤醒词'
+          pushMessage('pet', `好呀，先聊到这儿～ 说「${kw}」随时再叫我`)
+          window.api.setPetAnim('idle')
+        }
+        voice.onModeChanged = (mode) => {
+          window.api.switchMode(mode)
         }
         voice.onState = (s) => {
           stateLabel.value =
-            s === 'idle' ? `待机中，说「${wakeKeyword}」唤醒` : s === 'speaking' ? '正在回复…' : '聆听中…'
+            s === 'idle'
+              ? `闲聊模式 · 说「${wakeKeyword}」唤醒`
+              : s === 'speaking'
+                ? '正在回复…'
+                : '聆听中…'
           listening.value = s !== 'idle'
+          if (s === 'idle') sendVoiceState('idle')
+          else if (s === 'speaking') sendVoiceState('speaking')
+          else sendVoiceState('listening')
         }
-        // TTS 开始/结束 → 通知宠物窗口切换动画说话态
         voice.onTtsEvent = (kind) => {
           window.api.setPetAnim(kind === 'start' ? 'speaking' : 'idle')
         }
         voice.onWake = (kw) => {
           pushMessage('pet', `(唤醒成功：${kw})`)
+          sendVoiceState('listening')
         }
       }
       await voice.start(wake ? { wakeWord: true } : undefined)
-      stateLabel.value = wake ? `待机中，说「${wakeKeyword}」唤醒` : '聆听中…'
+      stateLabel.value = wake ? `闲聊模式 · 说「${wakeKeyword}」唤醒` : '聆听中…'
     } else {
       await voice?.stop()
       listening.value = false
       stateLabel.value = ''
+      sendVoiceState('off')
     }
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err)
@@ -102,11 +176,91 @@ function toggleMic(): void {
   }
 }
 
-// ---------- 全局状态（单选选中态，与主进程同步） ----------
+// ---------- 文本对话（主进程网关 chat:send 流式） ----------
+const running = ref(false)
+const backendState = ref<'connecting' | 'connected' | 'disconnected'>('connecting')
+let draftIndex = -1
+let chatAudioEl: HTMLAudioElement | null = null
+const animIdleTimer = ref<ReturnType<typeof setTimeout> | null>(null)
+
+function onTextSend(text: string): void {
+  pushMessage('user', text)
+  running.value = true
+  draftIndex = -1
+  window.api.chatSend(text, currentMode.value)
+}
+
+function onAbort(): void {
+  window.api.chatAbort()
+}
+
+function playChatAudio(base64Wav: string): void {
+  try {
+    chatAudioEl?.pause()
+    chatAudioEl = new Audio(`data:audio/wav;base64,${base64Wav}`)
+    void chatAudioEl.play().catch(() => {
+      /* ignore */
+    })
+  } catch {
+    /* ignore */
+  }
+}
+
+const unsubs: Array<() => void> = []
+unsubs.push(
+  window.api.onBackendStatus((p) => {
+    backendState.value = p.state
+  }),
+  window.api.onChatRunning((p) => {
+    running.value = p.running
+  }),
+  window.api.onChatDelta((d) => {
+    if (draftIndex < 0) {
+      pushMessage('pet', '')
+      draftIndex = messages.value.length - 1
+    }
+    const cur = messages.value[draftIndex]
+    messages.value[draftIndex] = { ...cur, text: cur.text + (d.text ?? '') }
+  }),
+  window.api.onChatDone((d) => {
+    if (draftIndex >= 0 && d.text) {
+      const clean = d.text.replace(/【action:[^】]*】/g, '').trim()
+      messages.value[draftIndex] = { ...messages.value[draftIndex], text: clean }
+    }
+    draftIndex = -1
+    running.value = false
+    if (d.audio) playChatAudio(d.audio)
+  }),
+  window.api.onTtsEvent((p) => {
+    if (p.kind === 'start') {
+      if (animIdleTimer.value) {
+        clearTimeout(animIdleTimer.value)
+        animIdleTimer.value = null
+      }
+      window.api.setPetAnim('speaking')
+    } else {
+      animIdleTimer.value = setTimeout(() => {
+        animIdleTimer.value = null
+        window.api.setPetAnim('idle')
+      }, 1200)
+    }
+  })
+)
+
+// ---------- 全局状态（模式 / 权限 / 皮肤 / 宠物可见性，与主进程同步） ----------
 const currentMode = ref<PetMode>('chat')
 const authPolicy = ref<AuthPolicy>('ask')
+const skin = ref<Skin>('dark')
+const petVisible = ref(true)
 
 let unsubModeChanged: (() => void) | null = null
+let unsubSkinChanged: (() => void) | null = null
+let unsubPetVisible: (() => void) | null = null
+
+/** 皮肤应用到当前窗口（html[data-skin] token 切换，白底黑字=light） */
+function applySkin(s: Skin): void {
+  document.documentElement.dataset.skin = s
+}
 
 onMounted(async () => {
   try {
@@ -122,12 +276,37 @@ onMounted(async () => {
   } catch {
     /* 保持默认 */
   }
+  try {
+    skin.value = await window.api.getSkin()
+  } catch {
+    /* 保持默认 */
+  }
+  applySkin(skin.value)
+  unsubSkinChanged = window.api.onSkinChanged((s) => {
+    skin.value = s
+    applySkin(s)
+  })
+  try {
+    petVisible.value = await window.api.getPetVisible()
+  } catch {
+    /* 保持默认 */
+  }
+  unsubPetVisible = window.api.onPetVisibleChanged((v) => {
+    petVisible.value = v
+  })
   // 自动启动语音：进入即「待机听唤醒」；点 🎙 才直接对话
   void setMicState(true, true)
 })
 
 onBeforeUnmount(() => {
   unsubModeChanged?.()
+  unsubSkinChanged?.()
+  unsubPetVisible?.()
+  for (const u of unsubs) u()
+  if (animIdleTimer.value) {
+    clearTimeout(animIdleTimer.value)
+    animIdleTimer.value = null
+  }
   void voice?.stop()
   voice = null
 })
@@ -135,6 +314,8 @@ onBeforeUnmount(() => {
 function selectMode(mode: PetMode): void {
   currentMode.value = mode
   window.api.switchMode(mode)
+  // 按钮切换同步到 8001 语音后端（否则后端 mode_state 停在旧模式）
+  voice?.setBackendMode(mode)
 }
 
 function selectAuth(policy: AuthPolicy): void {
@@ -142,7 +323,14 @@ function selectAuth(policy: AuthPolicy): void {
   window.api.setAuthPolicy(policy)
 }
 
-// ---------- 面板动作：关闭 / 设置 / 隐藏宠物 ----------
+function selectSkin(s: Skin): void {
+  skin.value = s
+  applySkin(s)
+  window.api.setSkin(s)
+  skinCardOpen.value = false
+}
+
+// ---------- 面板动作：关闭 / 设置 / 隐藏宠物（开关） ----------
 function closePanel(): void {
   window.api.closeChatPanel()
 }
@@ -151,33 +339,42 @@ function openSettings(): void {
   window.api.openPanel()
 }
 
-function hidePet(): void {
-  window.api.setPetVisible(false)
+/** 隐藏宠物 → 开关：隐藏后可再次点击恢复显示 */
+function togglePet(): void {
+  window.api.setPetVisible(!petVisible.value)
 }
 
-// ---------- 模式 / 权限弹出小卡片（250×100，悬浮面板上层，点空白关闭） ----------
+// ---------- 模式 / 权限 / 皮肤 弹出小卡片（按钮上方弹出，衬于面板上层） ----------
+const CARD_W = 250
+const CARD_GAP = 6
 const modeCardOpen = ref(false)
 const authCardOpen = ref(false)
-const modeCardPos = ref({ x: 0, y: 0 })
-const authCardPos = ref({ x: 0, y: 0 })
+const skinCardOpen = ref(false)
+const modeCardPos = ref({ x: 0, bottom: 0 })
+const authCardPos = ref({ x: 0, bottom: 0 })
+const skinCardPos = ref({ x: 0, bottom: 0 })
 
-function toggleModeCard(ev: MouseEvent): void {
-  const btn = ev.currentTarget as HTMLElement
-  const r = btn.getBoundingClientRect()
-  modeCardPos.value = { x: r.left, y: r.bottom + 4 }
-  modeCardOpen.value = !modeCardOpen.value
-  authCardOpen.value = false
+function cardPosAbove(btnRect: DOMRect): { x: number; bottom: number } {
+  const maxX = Math.max(0, Math.min(btnRect.left, window.innerWidth - CARD_W - 8))
+  const bottom = Math.max(8, window.innerHeight - btnRect.top + CARD_GAP)
+  return { x: maxX, bottom }
 }
 
-function toggleAuthCard(ev: MouseEvent): void {
-  const btn = ev.currentTarget as HTMLElement
-  const r = btn.getBoundingClientRect()
-  authCardPos.value = { x: r.left, y: r.bottom + 4 }
-  authCardOpen.value = !authCardOpen.value
-  modeCardOpen.value = false
+/** 打开一个卡片，关闭其余 */
+function openCard(kind: 'mode' | 'auth' | 'skin', ev: MouseEvent): void {
+  const btn = ev.currentTarget as HTMLElement | null
+  if (!btn) return
+  const pos = cardPosAbove(btn.getBoundingClientRect())
+  const want = kind === 'mode' ? !modeCardOpen.value : kind === 'auth' ? !authCardOpen.value : !skinCardOpen.value
+  modeCardOpen.value = kind === 'mode' ? want : false
+  authCardOpen.value = kind === 'auth' ? want : false
+  skinCardOpen.value = kind === 'skin' ? want : false
+  if (kind === 'mode' && want) modeCardPos.value = pos
+  if (kind === 'auth' && want) authCardPos.value = pos
+  if (kind === 'skin' && want) skinCardPos.value = pos
 }
 
-// ---------- 全局事件：ESC 关闭；点击面板外部由主进程处理 ----------
+// ---------- 全局事件：ESC 关闭 ----------
 function onKeyDown(e: KeyboardEvent): void {
   if (e.key === 'Escape') {
     closePanel()
@@ -194,28 +391,57 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <!-- 面板卡片：inset 留边，让圆角阴影在透明窗口内完整渲染；阴影扩散与消息条一致(2px/8px) -->
-  <div class="absolute inset-[16px] flex flex-col overflow-hidden rounded-xl bg-white shadow-[0_2px_8px_rgba(0,0,0,0.18)]">
-    <!-- 头部：40px，标题 + 最右侧关闭面板按钮；header 为可拖拽区（面板可自由移动），按钮需 no-drag -->
+  <!-- 面板卡片：token 化（深色=暗底浅字 / 浅色=白底黑字） -->
+  <div class="absolute inset-[16px] flex flex-col overflow-hidden rounded-xl bg-surface-1 shadow-ds-lg transition-colors duration-ds-md ease-expo-out">
+    <!-- 头部：40px，标题 + 状态 + 语音开关 + 关闭；header 为可拖拽区 -->
     <header
-      class="flex h-10 shrink-0 items-center justify-between border-b border-black/[0.06] px-3"
+      class="flex h-10 shrink-0 items-center justify-between border-b border-line-subtle px-3"
       style="-webkit-app-region: drag"
     >
-      <span class="text-[13px] font-semibold text-[#1a1a1a]">球球对话</span>
+      <span class="text-[13px] font-semibold text-fg-primary">西西对话</span>
       <div class="flex items-center gap-1.5" style="-webkit-app-region: no-drag">
-        <!-- 语音开关：开始/停止语音对话 -->
+        <!-- 后端连接状态 -->
+        <span
+          class="flex h-2 w-2 rounded-full"
+          :class="
+            backendState === 'connected'
+              ? 'bg-[#22c55e]'
+              : backendState === 'connecting'
+                ? 'bg-amber-400 animate-pulse'
+                : 'bg-[#ef4444]'
+          "
+          :title="
+            backendState === 'connected'
+              ? '后端已连接（ws://127.0.0.1:9000）'
+              : backendState === 'connecting'
+                ? '正在连接后端…'
+                : '后端未连接（Mock 9000 未启动）'
+          "
+        />
+        <!-- 语音开关 -->
         <button
           type="button"
           class="flex h-6 items-center gap-1 rounded-full px-2 text-[11px] font-medium transition-colors duration-200 ease-expo-out"
-          :class="listening ? 'bg-accent text-white' : 'bg-black/[0.06] text-[#8a8a8a] hover:bg-black/[0.12] hover:text-[#1a1a1a]'"
+          :class="listening ? 'bg-accent text-fg-inverse' : 'bg-surface-2 text-fg-secondary hover:bg-surface-3 hover:text-fg-primary'"
           :title="listening ? '停止语音' : '开始语音'"
           @click="toggleMic"
         >
-          <span :class="listening ? 'animate-pulse' : ''">{{ listening ? `${stateLabel || '● 对话中…'}` : '🎙 语音' }}</span>
+          <span :class="listening ? 'animate-pulse' : ''">{{ (listening || voice?.isRunning) ? (stateLabel || '● 对话中…') : '🎙 语音' }}</span>
+        </button>
+        <!-- 新建会话（开启全新对话：清空上下文 + 重连语音后端） -->
+        <button
+          type="button"
+          class="flex h-6 w-6 items-center justify-center rounded-full bg-surface-2 text-fg-secondary transition-colors duration-200 ease-expo-out hover:bg-surface-3 hover:text-fg-primary active:bg-surface-3"
+          title="新建会话"
+          @click="newSessionClick"
+        >
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+            <path d="M6 1.5v9M1.5 6h9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+          </svg>
         </button>
         <button
           type="button"
-          class="flex h-6 w-6 items-center justify-center rounded-full bg-black/[0.06] text-[#8a8a8a] transition-colors duration-200 ease-expo-out hover:bg-black/[0.12] hover:text-[#1a1a1a] active:bg-black/[0.16]"
+          class="flex h-6 w-6 items-center justify-center rounded-full bg-surface-2 text-fg-secondary transition-colors duration-200 ease-expo-out hover:bg-surface-3 hover:text-fg-primary active:bg-surface-3"
           title="关闭面板"
           @click="closePanel"
         >
@@ -226,25 +452,31 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
-    <!-- 消息区 + 输入区（flex 自适应共享剩余空间） -->
+    <!-- 消息区 + 输入区 -->
     <div class="flex min-h-0 flex-1 flex-col">
       <div class="min-h-0 flex-1 overflow-y-auto px-3 py-2">
         <div v-for="(m, i) in messages" :key="i" class="mb-1.5 text-[13px] leading-5">
           <template v-if="m.role === 'user'">
-            <span class="font-medium text-[#1a1a1a]">你：</span><span class="text-[#333]">{{ m.text }}</span>
+            <span class="font-medium text-fg-primary">你：</span><span class="text-fg-secondary">{{ m.text }}</span>
           </template>
           <template v-else>
-            <span class="font-medium text-[#5e6ad2]">球球：</span><span class="text-[#333]">{{ m.text }}</span>
+            <span class="font-medium text-accent">西西：</span><span class="text-fg-secondary">{{ m.text }}</span>
           </template>
         </div>
       </div>
 
       <ChatInputBar
+        :running="running"
+        :pet-visible="petVisible"
         @settings="openSettings"
         @file="() => undefined"
-        @mode-card="toggleModeCard"
-        @auth-card="toggleAuthCard"
-        @hide-pet="hidePet"
+        @mode-card="(e: MouseEvent) => openCard('mode', e)"
+        @auth-card="(e: MouseEvent) => openCard('auth', e)"
+        @skin-card="(e: MouseEvent) => openCard('skin', e)"
+        @hide-pet="togglePet"
+        @quit-app="quitApp"
+        @send="onTextSend"
+        @abort="onAbort"
       />
     </div>
 
@@ -252,18 +484,18 @@ onBeforeUnmount(() => {
     <div
       v-show="modeCardOpen"
       data-mode-card
-      class="fixed z-[10000] w-[250px] rounded-xl border border-black/[0.06] bg-white p-1.5 shadow-[0_8px_24px_rgba(0,0,0,0.18)]"
-      :style="{ left: `${modeCardPos.x}px`, top: `${modeCardPos.y}px` }"
+      class="fixed z-[10000] w-[250px] rounded-xl border border-line-subtle bg-surface-1 p-1.5 shadow-ds-lg"
+      :style="{ left: `${modeCardPos.x}px`, bottom: `${modeCardPos.bottom}px` }"
     >
       <button
         type="button"
-        class="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-[13px] text-[#1a1a1a] transition-colors duration-200 ease-expo-out hover:bg-black/[0.04] active:bg-black/[0.06]"
+        class="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-[13px] text-fg-primary transition-colors duration-200 ease-expo-out hover:bg-surface-2 active:bg-surface-3"
         :class="currentMode === 'chat' ? 'bg-accent/10 font-medium' : ''"
         @click="selectMode('chat')"
       >
         <span
           class="flex h-3 w-3 shrink-0 items-center justify-center rounded-full border"
-          :class="currentMode === 'chat' ? 'border-accent' : 'border-black/20'"
+          :class="currentMode === 'chat' ? 'border-accent' : 'border-line-strong'"
         >
           <span v-if="currentMode === 'chat'" class="h-1.5 w-1.5 rounded-full bg-accent" />
         </span>
@@ -271,13 +503,13 @@ onBeforeUnmount(() => {
       </button>
       <button
         type="button"
-        class="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-[13px] text-[#1a1a1a] transition-colors duration-200 ease-expo-out hover:bg-black/[0.04] active:bg-black/[0.06]"
+        class="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-[13px] text-fg-primary transition-colors duration-200 ease-expo-out hover:bg-surface-2 active:bg-surface-3"
         :class="currentMode === 'work' ? 'bg-accent/10 font-medium' : ''"
         @click="selectMode('work')"
       >
         <span
           class="flex h-3 w-3 shrink-0 items-center justify-center rounded-full border"
-          :class="currentMode === 'work' ? 'border-accent' : 'border-black/20'"
+          :class="currentMode === 'work' ? 'border-accent' : 'border-line-strong'"
         >
           <span v-if="currentMode === 'work'" class="h-1.5 w-1.5 rounded-full bg-accent" />
         </span>
@@ -289,18 +521,18 @@ onBeforeUnmount(() => {
     <div
       v-show="authCardOpen"
       data-auth-card
-      class="fixed z-[10000] w-[250px] rounded-xl border border-black/[0.06] bg-white p-1.5 shadow-[0_8px_24px_rgba(0,0,0,0.18)]"
-      :style="{ left: `${authCardPos.x}px`, top: `${authCardPos.y}px` }"
+      class="fixed z-[10000] w-[250px] rounded-xl border border-line-subtle bg-surface-1 p-1.5 shadow-ds-lg"
+      :style="{ left: `${authCardPos.x}px`, bottom: `${authCardPos.bottom}px` }"
     >
       <button
         type="button"
-        class="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-[13px] text-[#1a1a1a] transition-colors duration-200 ease-expo-out hover:bg-black/[0.04] active:bg-black/[0.06]"
+        class="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-[13px] text-fg-primary transition-colors duration-200 ease-expo-out hover:bg-surface-2 active:bg-surface-3"
         :class="authPolicy === 'full' ? 'bg-accent/10 font-medium' : ''"
         @click="selectAuth('full')"
       >
         <span
           class="flex h-3 w-3 shrink-0 items-center justify-center rounded-full border"
-          :class="authPolicy === 'full' ? 'border-accent' : 'border-black/20'"
+          :class="authPolicy === 'full' ? 'border-accent' : 'border-line-strong'"
         >
           <span v-if="authPolicy === 'full'" class="h-1.5 w-1.5 rounded-full bg-accent" />
         </span>
@@ -308,17 +540,50 @@ onBeforeUnmount(() => {
       </button>
       <button
         type="button"
-        class="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-[13px] text-[#1a1a1a] transition-colors duration-200 ease-expo-out hover:bg-black/[0.04] active:bg-black/[0.06]"
+        class="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-[13px] text-fg-primary transition-colors duration-200 ease-expo-out hover:bg-surface-2 active:bg-surface-3"
         :class="authPolicy === 'ask' ? 'bg-accent/10 font-medium' : ''"
         @click="selectAuth('ask')"
       >
         <span
           class="flex h-3 w-3 shrink-0 items-center justify-center rounded-full border"
-          :class="authPolicy === 'ask' ? 'border-accent' : 'border-black/20'"
+          :class="authPolicy === 'ask' ? 'border-accent' : 'border-line-strong'"
         >
           <span v-if="authPolicy === 'ask'" class="h-1.5 w-1.5 rounded-full bg-accent" />
         </span>
         请求批准
+      </button>
+    </div>
+
+    <!-- 皮肤弹出小卡片（与模式/权限同样式） -->
+    <div
+      v-show="skinCardOpen"
+      data-skin-card
+      class="fixed z-[10000] w-[250px] rounded-xl border border-line-subtle bg-surface-1 p-1.5 shadow-ds-lg"
+      :style="{ left: `${skinCardPos.x}px`, bottom: `${skinCardPos.bottom}px` }"
+    >
+      <button
+        type="button"
+        class="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-[13px] text-fg-primary transition-colors duration-200 ease-expo-out hover:bg-surface-2 active:bg-surface-3"
+        :class="skin === 'dark' ? 'bg-accent/10 font-medium' : ''"
+        @click="selectSkin('dark')"
+      >
+        <span class="flex h-3 w-3 shrink-0 items-center justify-center rounded-full border"
+              :class="skin === 'dark' ? 'border-accent' : 'border-line-strong'">
+          <span v-if="skin === 'dark'" class="h-1.5 w-1.5 rounded-full bg-accent" />
+        </span>
+        深色
+      </button>
+      <button
+        type="button"
+        class="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-[13px] text-fg-primary transition-colors duration-200 ease-expo-out hover:bg-surface-2 active:bg-surface-3"
+        :class="skin === 'light' ? 'bg-accent/10 font-medium' : ''"
+        @click="selectSkin('light')"
+      >
+        <span class="flex h-3 w-3 shrink-0 items-center justify-center rounded-full border"
+              :class="skin === 'light' ? 'border-accent' : 'border-line-strong'">
+          <span v-if="skin === 'light'" class="h-1.5 w-1.5 rounded-full bg-accent" />
+        </span>
+        浅色
       </button>
     </div>
   </div>

@@ -61,7 +61,7 @@ async def main():
     voice_weak = amp_scale(voice16, 0.3)  # 模拟 AEC 削弱后的插话
     voice_very_weak = amp_scale(voice16, 0.1)
 
-    # 球球回声样本：球球说话声（另一段 TTS），经 AEC 后残留（弱化）
+    # 西西回声样本：西西说话声（另一段 TTS），经 AEC 后残留（弱化）
     chunks2 = []
     async for c in tts.synth_stream("一、二、三、四、五、六、七、八、九、十！数完啦！有奖励吗？"):
         chunks2.append(c)
@@ -77,8 +77,8 @@ async def main():
         ("真人声(严重削弱x0.1)", voice_very_weak),
         ("白噪声", noise),
         ("440Hz正弦波", sine),
-        ("球球回声残留(x0.15)", ball_echo_weak),
-        ("球球回声+用户插话混合", ball_echo_weak + voice_weak),
+        ("西西回声残留(x0.15)", ball_echo_weak),
+        ("西西回声+用户插话混合", ball_echo_weak + voice_weak),
     ]
 
     print("=" * 72)

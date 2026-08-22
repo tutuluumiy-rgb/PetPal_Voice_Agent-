@@ -77,6 +77,20 @@ class AliyunTTS(TTSProvider):
             volume = None
             pitch_rate = None
 
+        # ── 用户语音设置真实应用（voice:settings：音色→语气前缀；音量/音调→数值参数）──
+        try:
+            from voice_settings import apply_to_tts_params
+            merged = apply_to_tts_params({
+                "instructions": instruction or "",
+                "volume": 50 if volume is None else volume,
+                "pitch_rate": 1.0 if pitch_rate is None else pitch_rate,
+            })
+            instruction = merged.get("instructions") or instruction
+            volume = merged.get("volume")
+            pitch_rate = merged.get("pitch_rate")
+        except Exception as e:
+            print(f"[tts] voice:settings 应用失败（忽略）: {e}")
+
         audio_queue = queue.Queue()
         done_event = threading.Event()
         t_start = time.time()

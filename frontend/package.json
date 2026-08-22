@@ -13,6 +13,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "@types/ws": "^8.18.1",
     "@vitejs/plugin-vue": "^5.2.1",
     "autoprefixer": "^10.4.20",
     "electron": "^33.2.0",
@@ -25,6 +26,7 @@
     "vue-tsc": "^2.1.10"
   },
   "dependencies": {
-    "sherpa-onnx-node": "^1.13.6"
+    "sherpa-onnx-node": "^1.13.6",
+    "ws": "^8.21.3"
   }
 }

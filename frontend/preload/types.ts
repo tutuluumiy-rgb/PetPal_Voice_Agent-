@@ -62,7 +62,57 @@ export const IPC_CH = {
   // 对话面板(chat) → 主进程：通知宠物进入 'speaking' / 'idle'（说话开始/结束）
   petAnim: 'pet-anim',
   // 主进程 → 宠物窗口：广播最新动画状态
-  petAnimChanged: 'pet-anim:changed'
+  petAnimChanged: 'pet-anim:changed',
+
+  // 语音界面状态（连接/待机/聆听/播报）：对话面板 → 主进程广播 → 宠物窗口消息条指示灯
+  voiceState: 'voice-state',
+  voiceStateChanged: 'voice-state:changed',
+
+  // 新建会话：对话面板 → 主进程广播（仅用于日志/占位，实际动作在前端重连语音 WS）
+  newSession: 'new-session',
+
+  // 退出应用：渲染进程 → 主进程（send）
+  appQuit: 'app-quit',
+
+  // ── 后端网关（主进程 → Mock/真实后端 9000，协议见 backend/docs/MOCK_CONTRACT.md）──
+  // 连接状态广播：主进程 → 渲染进程（connecting/connected/disconnected）
+  backendStatus: 'backend:status',
+  // 文本对话（流式）：渲染进程 → 主进程（send），附 { text, mode }
+  chatSend: 'chat:send',
+  // 中止当前生成：渲染进程 → 主进程（send）
+  chatAbort: 'chat:abort',
+  // 流式运行态：主进程 → 渲染进程（chat:running）
+  chatRunning: 'chat:running',
+  // 流式中间结果：主进程 → 渲染进程（chat:send:delta）
+  chatDelta: 'chat:delta',
+  // 生成完成：主进程 → 渲染进程（chat:send:done，含 reply/audio）
+  chatDone: 'chat:done',
+  // TTS 开始/结束：主进程 → 渲染进程（tts:start/tts:end）
+  ttsEvent: 'tts:event',
+
+  // 历史记录：渲染进程 → 主进程（invoke）
+  historyList: 'history:list',
+  historySearch: 'history:search',
+  // 人设 / 用户档案（invoke）
+  personalityGet: 'personality:get',
+  personalitySet: 'personality:set',
+  userGet: 'user:get',
+  userSet: 'user:set',
+  // 语音参数（invoke）
+  voiceSettingsGet: 'voice:settings:get',
+  voiceSettingsSet: 'voice:settings:set',
+
+  // 历史审详情（run 事件轨迹）：渲染进程 → 主进程（invoke）
+  historyDetail: 'history:detail',
+
+  // 皮肤主题：渲染进程 → 主进程（invoke / send）
+  skinGet: 'skin:get',
+  skinSet: 'skin:set',
+  // 皮肤变化广播：主进程 → 渲染进程
+  skinChanged: 'skin:changed',
+
+  // 宠物动画诊断：渲染进程 → 主进程（日志打到主进程终端，便于查看素材就绪状态）
+  animDebug: 'anim:debug'
 } as const
 
 /** 全局工作模式 */
@@ -75,6 +125,101 @@ export type AuthPolicy = 'full' | 'ask'
 export interface DragPoint {
   screenX: number
   screenY: number
+}
+
+// ── 后端网关共享数据类型（协议 MOCK_CONTRACT 方案 A，主进程/渲染进程共用） ──
+
+/** 网关连接状态（广播 backend:status 的 payload） */
+export type BackendStatusState = 'connecting' | 'connected' | 'disconnected'
+
+export interface BackendStatusPayload {
+  state: BackendStatusState
+}
+
+/** 历史记录条目（session 粒度：一次对话=一个 session，内含多轮 run） */
+export interface HistoryItem {
+  sessionId?: string
+  mode?: PetMode
+  time: number
+  preview: string
+  msgCount?: number
+  runCount?: number
+}
+
+/** 历史分页结果 */
+export interface HistoryPage {
+  items: HistoryItem[]
+  total: number
+  page: number
+}
+
+/** session 事件轨迹（history:detail 事件流；runId 变化可做按轮分组） */
+export interface HistoryEvent {
+  ts?: number
+  runId?: string
+  kind: 'user' | 'assistant' | 'tool' | 'tool_result' | 'system'
+  text?: string
+  name?: string
+  args?: Record<string, unknown>
+  subTurn?: number
+}
+
+export interface HistoryDetail {
+  sessionId?: string
+  title: string
+  events: HistoryEvent[]
+}
+
+/** 用户档案（users/<ACTIVE_USER>/profile.json 结构化） */
+export interface UserProfile {
+  basic: { name: string; role: string }
+  reply_style?: string
+  likes?: string[]
+  dislikes?: string[]
+  daily?: { wake_time?: string; sleep_time?: string }
+}
+
+/** 皮肤主题（深色 / 浅色·白底黑字） */
+export type Skin = 'dark' | 'light'
+
+/** 语音界面状态（消息条指示灯：idle=待机橙 / listening·speaking=对话绿 / off=未启用灰） */
+export type VoiceUiState = 'off' | 'idle' | 'listening' | 'speaking'
+
+export interface VoiceStatePayload {
+  state: VoiceUiState
+}
+
+/** 语音参数（volume/pitch 0-100；voice 枚举） */
+export interface VoiceSettings {
+  volume: number
+  pitch: number
+  voice: 'default' | 'cute' | 'calm' | 'bright'
+}
+
+/** 流式对话运行态（chat:running payload） */
+export interface ChatRunningPayload {
+  running: boolean
+  sessionId?: string
+}
+
+/** 流式中间结果（chat:send:delta payload） */
+export interface ChatDeltaPayload {
+  id?: string
+  text: string
+  action: string | null
+}
+
+/** 生成完成（chat:send:done payload） */
+export interface ChatDonePayload {
+  id?: string
+  text: string
+  action: string | null
+  audio?: string
+}
+
+/** TTS 播放事件（tts:event payload） */
+export interface TtsEventPayload {
+  kind: 'start' | 'end'
 }
 
 /**
@@ -149,4 +294,66 @@ export interface AppApi {
   setPetAnim(state: 'speaking' | 'idle'): void
   /** 订阅宠物动画状态广播（宠物窗口接收），返回取消订阅函数 */
   onPetAnimChanged(callback: (state: 'speaking' | 'idle') => void): () => void
+
+  // ── 后端网关（主进程 WebSocket → 9000，协议见 backend/docs/MOCK_CONTRACT.md）──
+
+  /** 订阅网关连接状态广播（主进程 → 渲染进程），返回取消订阅函数 */
+  onBackendStatus(callback: (payload: BackendStatusPayload) => void): () => void
+
+  /** 发送一条文本消息给后端（流式：走 chat:send，主进程广播 chat:running/delta/done） */
+  chatSend(text: string, mode: PetMode): void
+  /** 中止当前生成的 LLM 回复 / TTS */
+  chatAbort(): void
+  /** 订阅流式运行态（chat:running），返回取消订阅函数 */
+  onChatRunning(callback: (payload: ChatRunningPayload) => void): () => void
+  /** 订阅流式中间结果（chat:send:delta），返回取消订阅函数 */
+  onChatDelta(callback: (payload: ChatDeltaPayload) => void): () => void
+  /** 订阅生成完成（chat:send:done），返回取消订阅函数 */
+  onChatDone(callback: (payload: ChatDonePayload) => void): () => void
+  /** 订阅 TTS 播放事件（tts:event），返回取消订阅函数 */
+  onTtsEvent(callback: (payload: TtsEventPayload) => void): () => void
+
+  /** 查询历史记录（分页） */
+  historyList(page: number, pageSize: number, mode?: PetMode): Promise<HistoryPage>
+  /** 搜索历史记录（分页） */
+  historySearch(keyword: string, page: number, pageSize: number): Promise<HistoryPage>
+  /** 查询单个 session 的事件轨迹（抽屉展开；按 runId 分组） */
+  historyDetail(sessionId: string): Promise<HistoryDetail>
+
+  /** 读取人设 markdown */
+  personalityGet(): Promise<{ content: string }>
+  /** 保存人设 markdown */
+  personalitySet(content: string): Promise<void>
+  /** 读取用户档案（结构化 profile.json） */
+  userGet(): Promise<UserProfile>
+  /** 保存用户档案（结构化） */
+  userSet(profile: UserProfile): Promise<void>
+
+  /** 读取语音参数（音量/音调/音色） */
+  voiceSettingsGet(): Promise<VoiceSettings>
+  /** 保存语音参数 */
+  voiceSettingsSet(settings: VoiceSettings): Promise<VoiceSettings>
+
+  /** 读取皮肤主题 */
+  getSkin(): Promise<Skin>
+  /** 切换皮肤主题（主进程状态，广播到所有窗口） */
+  setSkin(skin: Skin): void
+  /** 订阅皮肤主题变化广播 */
+  onSkinChanged(callback: (skin: Skin) => void): () => void
+
+  /** 上报语音界面状态（对话面板 → 主进程广播给宠物窗口消息条指示灯） */
+  voiceState(payload: VoiceStatePayload): void
+  /** 订阅语音界面状态广播（宠物窗口接收） */
+  onVoiceState(callback: (payload: VoiceStatePayload) => void): () => void
+
+  /** 上报"新建会话"动作（对话面板发起；日志/广播用途） */
+  notifyNewSession(): void
+  /** 订阅新建会话广播（可选扩展点） */
+  onNewSession(callback: () => void): () => void
+
+  /** 退出应用（渲染进程 → 主进程，app.quit()） */
+  quitApp(): void
+
+  /** 上报宠物动画诊断信息（渲染进程 → 主进程，打印到主进程终端） */
+  reportAnimDebug(message: string): void
 }

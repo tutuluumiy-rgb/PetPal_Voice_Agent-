@@ -1,5 +1,5 @@
 /* ==========================================================================
-   球球 AI Agent — Linear 风格暗黑设计系统 Token
+   西西 AI Agent — Linear 风格暗黑设计系统 Token
    --------------------------------------------------------------------------
    唯一事实源（Single Source of Truth）。
    tailwind.config.ts 中的所有扩展值均引用此处 CSS 变量，禁止在组件中
@@ -79,5 +79,37 @@
   /* ---------- 控制面板分层背景：径向渐变底层 + noise 纹理 ---------- */
   --ds-layered-bg:
     radial-gradient(120% 90% at 50% -10%, rgba(94, 106, 210, 0.07), transparent 60%),
+    rgb(var(--ds-bg-0));
+}
+
+/* ==========================================================================
+   浅色皮肤（第二套：白底黑字）
+   通过 html[data-skin='light'] 覆盖 token；组件一律用 token 类即可双主题生效。
+   ========================================================================== */
+html[data-skin='light'] {
+  --ds-bg-0: 248 249 250;        /* #F8F9FA 窗口/页面底 */
+  --ds-bg-1: 255 255 255;        /* #FFFFFF 次级底（面板/卡片） */
+  --ds-bg-2: 243 244 246;        /* #F3F4F6 悬停层 */
+  --ds-bg-3: 255 255 255;        /* #FFFFFF 卡片表面 */
+
+  --ds-fg-primary: 24 25 28;     /* #18191C 主文本（黑） */
+  --ds-fg-secondary: 71 76 84;   /* #474C54 次级文本 */
+  --ds-fg-muted: 129 135 143;    /* #81878F 弱化文本 */
+  --ds-fg-inverse: 255 255 255;  /* 强调色上的反色文本 */
+
+  --ds-accent: 94 106 210;       /* 强调色保持不变 */
+  --ds-accent-hover: 111 123 224;
+
+  --ds-line-subtle: rgba(0, 0, 0, 0.08);
+  --ds-line-strong: rgba(0, 0, 0, 0.14);
+
+  --ds-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06), inset 0 0 0 1px rgba(0, 0, 0, 0.03);
+  --ds-shadow-md: 0 2px 8px rgba(0, 0, 0, 0.06), 0 8px 24px rgba(0, 0, 0, 0.05), inset 0 0 0 1px rgba(0, 0, 0, 0.02);
+  --ds-shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.08), 0 16px 48px rgba(0, 0, 0, 0.08), inset 0 0 0 1px rgba(0, 0, 0, 0.03);
+  --ds-shadow-hover: 0 1px 3px rgba(0, 0, 0, 0.06), inset 0 0 0 1px rgba(0, 0, 0, 0.02);
+  --ds-shadow-active: 0 1px 2px rgba(0, 0, 0, 0.08), inset 0 0 0 1px rgba(0, 0, 0, 0.02), inset 0 2px 4px rgba(0, 0, 0, 0.05);
+
+  --ds-layered-bg:
+    radial-gradient(120% 90% at 50% -10%, rgba(94, 106, 210, 0.06), transparent 60%),
     rgb(var(--ds-bg-0));
 }

@@ -5,7 +5,8 @@
  *   前端→后端：二进制 PCM（Int16 16k）+ JSON 控制消息
  *              { type:'speech_start', preRollBase64 } / { type:'speech_end' } / { type:'vad_cancel' }
  *   后端→前端：JSON（ready/asr_partial/asr_final/reply_start/reply/reply_append/reply_end/
- *              tts_start/tts_end/barge_confirm/barge_reject/stop_playback）+ 二进制 TTS PCM(24k)
+ *              tts_start/tts_end/barge_confirm/barge_reject/stop_playback/mode_changed）+ 二进制 TTS PCM(24k)
+ *            mode_changed：语音切模式 → onModeChanged 回调 → UI 同步主进程 → 面板/动画三端一致
  *
  * 基于测试看板（testboard）验证过的采集 + Silero VAD 逻辑迁移；renderer 直连音频 WS。
  * 依赖 renderer/assets/vad/ 的 UMD 库（onnxruntime-web + @ricky0123/vad-web）。
@@ -49,6 +50,12 @@ export class VoicePipeline {
   onReply?: (text: string, append: boolean) => void
   onState?: (state: 'idle' | 'listening' | 'speaking') => void
   onTtsEvent?: (kind: 'start' | 'end') => void
+  /** 命中退出语（拜拜/再见…）回到待机/聆听时的回调（供 UI 提示） */
+  onExit?: () => void
+  /** 后端语音切模式（mode_changed：说"打开工作模式"等）→ 交给 UI 同步主进程 */
+  onModeChanged?: (mode: 'chat' | 'work') => void
+  /** 口语命中「新建会话」→ UI 清空消息（重连由本类 newSession() 执行） */
+  onNewSession?: () => void
 
   // ---------- 唤醒词（KWS）待机：渲染进程采集 → 主进程 sherpa-onnx-node 推理 ----------
   private kwsUnsub: (() => void) | null = null
@@ -74,8 +81,15 @@ export class VoicePipeline {
    * 全角/半角、首尾空格可容错；与用户说法的子串匹配。
    */
   private readonly EXIT_WORDS: readonly string[] = [
-    '拜拜', '再见', '退出聊天', '退出对话', '不聊了', '先这样吧', '聊到这',
-    '下次再聊', '回头聊', '晚安', '去忙了', '我要忙了', '挂了吧', '回见',
+    '拜拜', '再见', '退出聊天', '退出对话', '结束对话', '不聊了', '先这样吧', '聊到这',
+    '下次再聊', '回头聊', '晚安', '去忙了', '我要忙了', '挂了吧', '回见', '退下吧',
+  ]
+
+  /** 口语「新建会话」：命中即清空上下文开始全新对话（不回待机），子串匹配 */
+  private readonly NEW_SESSION_WORDS: readonly string[] = [
+    '创建新对话', '创建新会话', '新建对话', '新建会话', '新开一个对话', '新开一个话题',
+    '换个话题', '换一个话题', '重新开始对话', '重新开始', '开始新话题', '开个新话题',
+    '清除记忆', '重置对话', '忘掉之前', '不记得之前',
   ]
 
   get isRunning(): boolean {
@@ -193,6 +207,37 @@ export class VoicePipeline {
     return this.EXIT_WORDS.some((w) => t.includes(w.replace(/\s+/g, '')))
   }
 
+  /** 用户说法是否命中「新建会话」规则（口语开启全新对话，仍然保持对话态）。 */
+  private _isNewSessionText(text: string): boolean {
+    const t = (text || '').replace(/\s+/g, '')
+    if (!t) return false
+    return this.NEW_SESSION_WORDS.some((w) => t.includes(w.replace(/\s+/g, '')))
+  }
+
+  /**
+   * 主动/语音创建新会话：清掉当前上下文并重连语音 WS。
+   * 后端按连接创建会话（main.py: 每次 /ws/audio 连接一个 ConversationSession），
+   * 重连后即得到全新的会话（干净历史），前端继续留在对话态。
+   */
+  async newSession(): Promise<void> {
+    console.log('[voice] 创建新会话：断开并重连语音后端')
+    this.resetPlayback()
+    this._closeWs()
+    try {
+      await this._connectWs()
+      this._armIdleTimer()
+      this.onState?.('listening')
+    } catch (err) {
+      console.error('[voice] 新建会话重连失败，回待机:', err)
+      if (this.wakeWordOn) {
+        this._backToWake()
+      } else {
+        this.conversationStarted = false
+        this.onState?.('listening')
+      }
+    }
+  }
+
   /** 统一音频帧分配：待机喂主进程 KWS（IPC），对话中喂后端 */
   private _onAudioFrame(input: Float32Array): void {
     if (this.wakeWordOn && !this.conversationStarted) {
@@ -273,9 +318,17 @@ export class VoicePipeline {
       case 'asr_final': {
         const text = (msg.text ?? '').trim()
         if (text) {
+          // 口语「新建会话」（创建新对话/换个话题…）：清空上下文重新对话，维持对话态
+          if (this._isNewSessionText(text)) {
+            console.log('[voice] 收到新建会话指令:', text)
+            this.onNewSession?.()
+            void this.newSession()
+            break
+          }
           // 口语退出对话（不是退出前端）：命中即回待机
           if (this._isExitText(text)) {
             console.log('[voice] 收到退出语，回到待机:', text)
+            this.onExit?.()
             if (this.wakeWordOn) this._backToWake()
             else this.onState?.('listening')
             break
@@ -296,7 +349,11 @@ export class VoicePipeline {
         this._armIdleTimer()
         break
       case 'tts_start':
-        this.resetPlayback()
+        // ⚠️ 修复「两句抢话」：多句回复的每一句都会触发 tts_start，若上一句还在播放
+        // 就无条件 resetPlayback()，会把上一句剩余音频掐掉、第二句立刻响起（重叠/抢话）。
+        // 正确行为：仅当时间线空闲（无排队/无播放）时才重置（兜底漏 reply 的情况）；
+        // 上一句仍在播时让新句音频经 _onAudio 的 nextStartTime 自然接续，无缝连贯。
+        if (!this._hasActivePlayback()) this.resetPlayback()
         this.onTtsEvent?.('start')
         this.onState?.('speaking')
         this._armIdleTimer()
@@ -310,13 +367,36 @@ export class VoicePipeline {
         this.onState?.('listening')
         this._armIdleTimer()
         break
-      case 'ready':
-      case 'asr_partial':
+      case 'stop_playback':
+        // 契约 §4.13：停止当前（进度）音频播放，直接转最终回复
+        this.resetPlayback()
+        break
       case 'barge_confirm':
+        // 契约 §4.11：后端确认真打断 → 前端立即停止播放（等 backend_state_change 同步状态）
+        this.resetPlayback()
+        break
+      case 'mode_changed': {
+        // 契约 §4.3：语音切模式（如"打开工作模式"）→ 通知 UI 同步主进程，
+        // 由主进程广播 mode:changed 回面板选项 + 宠物动画（三端同步）
+        const m = msg.mode === 'work' ? 'work' : 'chat'
+        console.log('[voice] mode_changed:', m, msg.notice ?? '')
+        this.onModeChanged?.(m)
+        break
+      }
+      case 'ready':
+        // 连接就绪：向后端同步一次当前模式（get_mode → 后端回 mode_changed → onModeChanged → 三端一致）
+        this._control({ type: 'get_mode' })
+        break
+      case 'asr_partial':
       case 'barge_reject':
       default:
         break
     }
+  }
+
+  /** 手动（按钮）切换模式 → 同步到 8001 后端（契约 §3.1 set_mode），保后端/面板/动画一致 */
+  setBackendMode(mode: 'chat' | 'work'): void {
+    this._control({ type: 'set_mode', mode })
   }
 
   /** 后端 TTS PCM（24k mono 16bit）→ 时间线接续播放 */
@@ -366,6 +446,15 @@ export class VoicePipeline {
       gain: this.gainNode!,
       state: this._playbackState!,
     }
+  }
+
+  /** 是否有尚未播完/已排队待播的音频（决定 tts_start 是否该重置时间线） */
+  private _hasActivePlayback(): boolean {
+    const p = this._playbackState
+    if (!this.playbackCtx || !p) return false
+    if (p.active.length > 0) return true
+    // 音频可能已全部播完但下一句音频块还在路上：以时间线是否仍在未来判断
+    return p.nextStartTime > this.playbackCtx.currentTime + 0.1
   }
 
   /** 新一段回复/打断时：停止当前播放、重置时间线（不留上一段残留音频） */

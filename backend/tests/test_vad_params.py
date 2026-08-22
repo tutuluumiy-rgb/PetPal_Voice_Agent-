@@ -5,7 +5,7 @@
 样本：
   A 真插话（正常音量 x1.0）     —— 长缓存（回声基线+插话）应【确认】
   B 真插话（AEC削弱 x0.3）      —— 长缓存应【确认】
-  C 纯球球回声（x0.15）         —— 长缓存应【拒绝】（能量平稳）
+  C 纯西西回声（x0.15）         —— 长缓存应【拒绝】（能量平稳）
   D 短缓存真话（<1024ms）       —— 无能量基线，靠占比，应【确认】
   E 短缓存纯回声（<1024ms）     —— 无能量基线，靠占比，应【拒绝】
 
@@ -88,7 +88,7 @@ async def main():
         chunks.append(c)
     voice = downsample_24k_to_16k(b"".join(chunks))
 
-    # 回声基线（模拟球球正在说话）
+    # 回声基线（模拟西西正在说话）
     echo = amp_scale(voice, 0.15)
     silence = bytes(bytearray(int(SAMPLE_RATE * 0.3 * 2)))
 

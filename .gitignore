@@ -28,6 +28,9 @@ backend/sessions_*_tmp/
 backend/memories/
 backend/memories_*_tmp/
 
+# ── 运行时设置（本地个性化，不入库）──
+backend/data/
+
 # ── 前端会话日志（含对话内容，绝不提交）──
 frontend/docs/session.jsonl
 

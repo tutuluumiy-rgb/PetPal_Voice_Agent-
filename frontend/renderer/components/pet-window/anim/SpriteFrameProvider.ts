@@ -7,6 +7,34 @@
 import type { FrameStateConfig, PetAnimState } from './types'
 import { BALL_BOTTOM_PADDING } from '../pet-canvas'
 
+/**
+ * 帧文件名连字符的「历史坑」：约定是 U+2011 非断行连字符（frame‑01.png），
+ * 但素材被某些工具/复制流程规范化成普通 U+002D（frame-01.png）会导致整套素材 404。
+ * 加载时两种连字符都尝试，任一命中即算成功。
+ */
+const NB_HYPHEN = '\u2011'
+const REG_HYPHEN = '-'
+
+/** 生成某帧 URL 的候选列表（含连字符变体去重） */
+function frameCandidates(src: string): string[] {
+  const out = [src]
+  if (src.includes(NB_HYPHEN)) out.push(src.replaceAll(NB_HYPHEN, REG_HYPHEN))
+  else if (src.includes(REG_HYPHEN)) out.push(src.replaceAll(REG_HYPHEN, NB_HYPHEN))
+  return [...new Set(out)]
+}
+
+async function loadImageAny(candidates: string[]): Promise<HTMLImageElement> {
+  let lastErr: unknown = null
+  for (const src of candidates) {
+    try {
+      return await loadImage(src)
+    } catch (err) {
+      lastErr = err
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(`sprite load fail: ${candidates[0]}`)
+}
+
 export class SpriteFrameProvider {
   private images = new Map<string, HTMLImageElement>()
   private manifest: Partial<Record<PetAnimState, FrameStateConfig>>
@@ -27,11 +55,12 @@ export class SpriteFrameProvider {
     if (!cfg || cfg.ready) return
     const url = (f: string): string => (baseUrl ? `${baseUrl}/${f}` : f)
     try {
-      const imgs = await Promise.all(cfg.frames.map((f) => loadImage(url(f))))
+      const imgs = await Promise.all(cfg.frames.map((f) => loadImageAny(frameCandidates(url(f)))))
       imgs.forEach((img, i) => this.images.set(key(state, i), img))
       cfg.ready = true
-    } catch {
+    } catch (e) {
       cfg.ready = false
+      console.warn(`[anim] ${state} 素材加载失败，回落程序化动画`, e)
     }
   }
 

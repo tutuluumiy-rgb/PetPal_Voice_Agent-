@@ -37,15 +37,21 @@ STATE = {
         "# 人设\n\n你是「宠伴」（PetPal），一只俏皮又贴心的 AI 语音宠物。\n"
         "- 说话带语气词，亲切自然\n- 主动发起话题\n- 关心主人的情绪\n"
     ),
-    "user_profile": "# 用户档案\n\n- 称呼：主人\n- 偏好：喜欢 AI 与科技新闻\n",
+    "user_profile": {
+        "basic": {"name": "主人", "role": "owner"},
+        "reply_style": "活泼撒娇、话多、偶尔卖萌",
+        "likes": ["被摸头", "被夸", "一起看视频"],
+        "dislikes": ["熬夜", "被冷落"],
+        "daily": {"wake_time": "07:30", "sleep_time": "23:30"},
+    },
     "voice": {"volume": 80, "pitch": 50, "voice": "default"},
     "history": [
-        {"id": "h-1001", "mode": "chat", "time": int(time.time() * 1000) - 60_000,
-         "preview": "你好球球，今天天气怎么样？"},
-        {"id": "h-1002", "mode": "work", "time": int(time.time() * 1000) - 600_000,
-         "preview": "帮我整理一下项目需求文档"},
-        {"id": "h-1003", "mode": "chat", "time": int(time.time() * 1000) - 3600_000,
-         "preview": "讲个笑话给我听听"},
+        {"sessionId": "mock-s1", "time": int(time.time() * 1000) - 60_000, "preview": "你好西西，今天天气怎么样？",
+         "msgCount": 6, "runCount": 2},
+        {"sessionId": "mock-s2", "time": int(time.time() * 1000) - 600_000, "preview": "帮我整理一下项目需求文档",
+         "msgCount": 5, "runCount": 1},
+        {"sessionId": "mock-s3", "time": int(time.time() * 1000) - 3600_000, "preview": "讲个笑话给我听听",
+         "msgCount": 4, "runCount": 1},
     ],
     "clients": [],  # 所有已连接 ws（用于广播）
 }
@@ -66,6 +72,15 @@ _CHAT_REPLIES = {
 
 async def _send(ws: WebSocket, obj: dict):
     await ws.send_text(json.dumps(obj, ensure_ascii=False))
+
+
+def _fmt_mock_time(ms: float) -> str:
+    """毫秒时间戳 → 'MM-DD HH:mm'（抽屉标题用）"""
+    try:
+        import datetime
+        return datetime.datetime.fromtimestamp(ms / 1000).strftime("%m-%d %H:%M")
+    except Exception:
+        return "--:--"
 
 
 async def _stream_reply(ws: WebSocket, sid: str, text: str):
@@ -151,11 +166,18 @@ async def ws_endpoint(ws: WebSocket):
                 plan = _stream_reply(ws, mid, " ".join(replies))
                 await plan
                 await _send(ws, {"type": "chat:running", "sessionId": "mock-s1", "running": False})
-                # 追加一条假历史
-                STATE["history"].insert(0, {
-                    "id": "h-" + uuid.uuid4().hex[:4], "mode": mode,
-                    "time": int(time.time() * 1000), "preview": (text or "")[:40],
-                })
+                # 追加到 mock-s1 会话（session 粒度：更新该条而非新建）
+                row = next((h for h in STATE["history"] if h["sessionId"] == "mock-s1"), None)
+                if row:
+                    row["time"] = int(time.time() * 1000)
+                    row["runCount"] = row.get("runCount", 1) + 1
+                    row["msgCount"] = row.get("msgCount", 1) + 1
+                else:
+                    STATE["history"].insert(0, {
+                        "sessionId": "mock-s1", "mode": mode,
+                        "time": int(time.time() * 1000), "preview": (text or "")[:40],
+                        "msgCount": 1, "runCount": 1,
+                    })
             elif mtype == "chat:abort":
                 await _send(ws, {"type": "chat:abort:ok", "id": mid, "aborted": True})
                 await _send(ws, {"type": "chat:running", "sessionId": "mock-s1", "running": False})
@@ -172,6 +194,30 @@ async def ws_endpoint(ws: WebSocket):
                 page_items = items[start:start + pageSize]
                 await _send(ws, {"type": "history:list:ok", "id": mid,
                                  "items": page_items, "total": total, "page": page})
+            elif mtype == "history:detail":
+                # 按 sessionId 构造假事件流（两轮 run，演示按轮分组；真实后端见 mgmt_api）
+                sid = msg.get("sessionId") or ""
+                item = next((h for h in STATE["history"] if h["sessionId"] == sid), None)
+                if item is None and STATE["history"]:
+                    item = STATE["history"][0]
+                base_ts = (item or {}).get("time", int(time.time() * 1000)) / 1000
+                preview = (item or {}).get("preview", "你好西西，今天天气怎么样？")
+                run_a = {"ts": base_ts, "runId": "run-a", "kind": "user", "text": preview, "subTurn": 1}
+                events = [
+                    run_a,
+                    {"ts": base_ts + 0.8, "runId": "run-a", "kind": "assistant",
+                     "text": "[开心]好呀主人～我是宠伴，随时在呢！", "subTurn": 1},
+                    {"ts": base_ts + 3.5, "runId": "run-b", "kind": "user", "text": "继续讲讲。", "subTurn": 1},
+                    {"ts": base_ts + 4.4, "runId": "run-b", "kind": "tool", "name": "search",
+                     "args": {"query": preview}, "subTurn": 1},
+                    {"ts": base_ts + 5.6, "runId": "run-b", "kind": "tool_result", "name": "search",
+                     "text": "（mock 结果）找到 3 条相关结果…", "subTurn": 1},
+                    {"ts": base_ts + 6.5, "runId": "run-b", "kind": "assistant",
+                     "text": "[平静]查好啦，这是你要的信息～", "subTurn": 2},
+                ]
+                await _send(ws, {"type": "history:detail:ok", "id": mid, "sessionId": sid,
+                                 "title": f"{_fmt_mock_time((item or {}).get('time', 0))} {preview[:20]}",
+                                 "events": events})
             # ── 人设 / 用户档案 ──
             elif mtype == "personality:get":
                 await _send(ws, {"type": "personality:get:ok", "id": mid, "content": STATE["personality"]})
@@ -179,9 +225,12 @@ async def ws_endpoint(ws: WebSocket):
                 STATE["personality"] = msg.get("content", "")
                 await _send(ws, {"type": "personality:set:ok", "id": mid})
             elif mtype == "user:get":
-                await _send(ws, {"type": "user:get:ok", "id": mid, "content": STATE["user_profile"]})
+                await _send(ws, {"type": "user:get:ok", "id": mid, **STATE["user_profile"]})
             elif mtype == "user:set":
-                STATE["user_profile"] = msg.get("content", "")
+                payload = msg.get("profile") if isinstance(msg.get("profile"), dict) else msg
+                for k in ("basic", "reply_style", "likes", "dislikes", "daily"):
+                    if k in payload:
+                        STATE["user_profile"][k] = payload[k]
                 await _send(ws, {"type": "user:set:ok", "id": mid})
             # ── 语音参数 ──
             elif mtype == "voice:settings:get":

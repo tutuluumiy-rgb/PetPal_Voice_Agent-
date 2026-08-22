@@ -50,7 +50,7 @@ export function initKws(): void {
   const dir = modelDir()
   const encoder = path.join(dir, 'encoder.onnx')
   if (!fs.existsSync(encoder)) {
-    console.warn('[kws] 未找到模型，跳过唤醒词。请先：python scripts/download_kws.py（模型应含 encoder.onnx）')
+    console.warn('[kws] model not found, skip wake-word. Run: python scripts/download_kws.py (need encoder.onnx)')
     return
   }
   // 2) require 原生绑定
@@ -58,11 +58,11 @@ export function initKws(): void {
   try {
     sherpa = require('sherpa-onnx-node')
   } catch (e) {
-    console.error('[kws] 加载 sherpa-onnx-node 失败，请先 cd frontend && npm i sherpa-onnx-node (ABI 不匹配: npx @electron/rebuild -f -w sherpa-onnx-node)', e)
+    console.error('[kws] failed to load sherpa-onnx-node, run: cd frontend && npm i sherpa-onnx-node (ABI mismatch: npx @electron/rebuild -f -w sherpa-onnx-node)', e)
     return
   }
   if (!sherpa?.KeywordSpotter) {
-    console.error('[kws] sherpa-onnx-node 缺少 KeywordSpotter（版本过旧）')
+    console.error('[kws] sherpa-onnx-node missing KeywordSpotter (version too old)')
     return
   }
   // 3) 关键词表（优先模型自带 keywords.txt）
@@ -104,7 +104,7 @@ export function initKws(): void {
       }
     },
   }
-  console.log('[kws] 唤醒词已就绪, 模型目录:', dir, ', 词表:', keywordsFile ? path.basename(keywordsFile) : '未指定')
+  console.log('[kws] wake-word ready, model dir:', dir, ', keywords:', keywordsFile ? path.basename(keywordsFile) : 'none')
 }
 
 /** 喂入一帧 16k 浮点音频（渲染进程经 IPC kws:feed 上报） */
@@ -118,14 +118,14 @@ function feedPcm(float32: Float32Array): void {
     const result = kws.spotter.getResult(kws.stream)
     const keyword: string = result?.keyword
     if (keyword) {
-      console.log('[kws] 命中唤醒词:', keyword)
+      console.log('[kws] wake word hit:', keyword)
       kws.onWake(keyword)
       try {
         kws.spotter.reset(kws.stream) // 命中后复位，准备下一次唤醒
       } catch { /* ignore */ }
     }
   } catch (e) {
-    console.error('[kws] 推理出错', e)
+    console.error('[kws] inference error', e)
   }
 }
 

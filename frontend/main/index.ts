@@ -5,9 +5,10 @@
  * 渲染进程只负责 UI 渲染，业务逻辑不上渲染进程。
  */
 import { app, BrowserWindow, session } from 'electron'
-import { registerIpcHandlers } from './ipc'
+import { registerIpcHandlers, loadSkinPref } from './ipc'
 import { createPetWindow, destroyWindows, createChatWindow } from './windows'
 import { setupKws } from './kws'
+import { backendGateway } from './services/backendGateway'
 
 // ---------- 媒体权限：允许 renderer 使用麦克风（语音采集 getUserMedia 必需） ----------
 // Electron 默认对 getUserMedia 的 'media' 权限会弹系统询问；自动启动（无用户手势）时
@@ -34,11 +35,17 @@ if (!gotLock) {
   })
 
   app.whenReady().then(() => {
+    // 皮肤偏好（userData/skin.json）→ 主进程状态（窗口创建前）
+    loadSkinPref()
+
     // 注册全部 IPC（窗口创建前完成，避免渲染进程早期调用落空）
     registerIpcHandlers()
 
     // 唤醒词（KWS）主进程：注册 IPC + 懒加载初始化（sherpa-onnx-node，缺库/模型会打印警告）
     setupKws()
+
+    // 后端网关（Mock 9000 / 真实后端同契约）：建立连接、广播状态、供 IPC 调用
+    backendGateway.init()
 
     // 启动即创建悬浮宠物主窗口；控制面板由右键菜单「设置」按需打开
     createPetWindow()
@@ -57,6 +64,7 @@ if (!gotLock) {
   })
 
   app.on('before-quit', () => {
+    backendGateway.dispose()
     destroyWindows()
   })
 
