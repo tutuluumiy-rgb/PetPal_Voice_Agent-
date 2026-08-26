@@ -4,7 +4,7 @@
  * 字段：basic(称呼/角色) + reply_style + likes/dislikes + daily(作息)
  * 按钮走控制面板右下角操作栏（保存=主、撤销=次）。
  */
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { onActivated, onBeforeUnmount, onMounted, ref } from 'vue'
 import PageCard from '../PageCard.vue'
 import type { UserProfile } from '../../../../preload/types'
 import { setPanelActions, clearPanelActions } from '../../../app/panelActions'
@@ -81,11 +81,18 @@ async function save(): Promise<void> {
 
 onMounted(() => {
   void load()
+  registerActions()
+})
+
+// KeepAlive 激活（首次挂载与切回）时重新注册右下角操作按钮
+onActivated(registerActions)
+
+function registerActions(): void {
   setPanelActions([
     { key: 'revert', label: '撤销', onClick: () => void load() },
     { key: 'save', label: '保存', primary: true, disabled: () => saving.value, onClick: () => void save() },
   ])
-})
+}
 
 onBeforeUnmount(() => {
   clearPanelActions()

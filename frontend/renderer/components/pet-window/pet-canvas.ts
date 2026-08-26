@@ -93,11 +93,6 @@ export function initPetCanvas(canvas: HTMLCanvasElement, imageUrl?: string): voi
   canvas.height = PET_CANVAS_SIZE.height
   canvas.style.width = `${PET_CANVAS_SIZE.width}px`
   canvas.style.height = `${PET_CANVAS_SIZE.height}px`
-  // 诊断：启动时打印画布逻辑/显示尺寸，便于 devtools 核对（拖拽后若此处尺寸变了，
-  // 说明有外部代码在改 canvas 尺寸——当前源码无此路径，阿里排查“容器被撑大”）。
-  console.log(
-    `[pet-canvas] init lock size attr=(${canvas.width}x${canvas.height}) css=(${canvas.style.width}x${canvas.style.height})`
-  )
   const ctx = canvas.getContext('2d')
   if (!ctx) return
 

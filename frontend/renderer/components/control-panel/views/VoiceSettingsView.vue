@@ -4,25 +4,26 @@
  * 真实后端落盘 backend/data/voice_settings.json，且音色/音量/音调实际作用于 TTS。
  * 按钮走控制面板右下角操作栏（保存=主、撤销=次）。
  */
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { onActivated, onBeforeUnmount, onMounted, ref } from 'vue'
 import PageCard from '../PageCard.vue'
-import type { VoiceSettings } from '../../../../preload/types'
+import type { VoiceInfo } from '../../../../preload/types'
 import { setPanelActions, clearPanelActions } from '../../../app/panelActions'
 
 const volume = ref(80)
 const pitch = ref(50)
-const voice = ref<VoiceSettings['voice']>('default')
+const voice = ref<string>('default')
 
 const loading = ref(true)
 const saving = ref(false)
 const error = ref('')
 const savedTip = ref('')
 
-const VOICE_OPTIONS: Array<{ value: VoiceSettings['voice']; label: string }> = [
-  { value: 'default', label: '默认音色' },
-  { value: 'cute', label: '软萌音' },
-  { value: 'calm', label: '沉稳音' },
-  { value: 'bright', label: '明亮音' }
+// 音色列表：按当前 TTS 模型实时拉取（voice:voices）；拉不到时用本地兜底
+const voiceOptions = ref<VoiceInfo[]>([])
+const FALLBACK_VOICES: VoiceInfo[] = [
+  { id: 'Cherry', label: 'Cherry · 甜美女声' },
+  { id: 'Serena', label: 'Serena · 温柔女声' },
+  { id: 'Mochi', label: 'Mochi · 沙小弥' }
 ]
 
 async function load(): Promise<void> {
@@ -35,6 +36,21 @@ async function load(): Promise<void> {
     voice.value = s.voice ?? 'default'
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err)
+  }
+  // 实时拉取音色列表（失败则用本地兜底）
+  try {
+    const list = await window.api.voiceVoices()
+    voiceOptions.value = list?.voices?.length ? list.voices : FALLBACK_VOICES
+    if (list?.current && !voiceOptions.value.some((v) => v.id === voice.value)) {
+      voice.value = list.current
+    }
+  } catch (e) {
+    voiceOptions.value = FALLBACK_VOICES
+    // 兜底项里没有当前 voice 时，补一个当前音色项避免下拉空值
+    if (voice.value && !voiceOptions.value.some((v) => v.id === voice.value)) {
+      voiceOptions.value = [{ id: voice.value, label: `${voice.value}（当前）` }, ...voiceOptions.value]
+    }
+    console.warn('[voice] 拉取音色列表失败:', e)
   } finally {
     loading.value = false
   }
@@ -59,11 +75,18 @@ async function save(): Promise<void> {
 
 onMounted(() => {
   void load()
+  registerActions()
+})
+
+// KeepAlive 激活（首次挂载与切回）时重新注册右下角操作按钮
+onActivated(registerActions)
+
+function registerActions(): void {
   setPanelActions([
     { key: 'revert', label: '撤销', onClick: () => void load() },
     { key: 'save', label: '保存', primary: true, disabled: () => saving.value, onClick: () => void save() },
   ])
-})
+}
 
 onBeforeUnmount(() => {
   clearPanelActions()
@@ -113,7 +136,7 @@ onBeforeUnmount(() => {
             v-model="voice"
             class="h-8 w-full max-w-56 rounded-md border border-line-subtle bg-surface-1 px-2 text-[13px] text-fg-primary outline-none transition-all duration-ds-sm ease-expo-out focus:border-accent/60"
           >
-            <option v-for="opt in VOICE_OPTIONS" :key="opt.value" :value="opt.value">
+            <option v-for="opt in voiceOptions" :key="opt.id" :value="opt.id">
               {{ opt.label }}
             </option>
           </select>

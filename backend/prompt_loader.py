@@ -1,14 +1,19 @@
-"""系统提示词加载与组装：人格 + 语气 + 用户档案（全部独立成文件，可编辑不改代码）
+"""系统提示词加载与组装：人格 + 用户档案（全部独立成文件，可编辑不改代码）
+
+注意：语音控制提示词（minimax_voice_style.md）【不拼入】大模型——
+      让 LLM 生成 <#x#>/(breath) 等标签不可靠（会读出），停顿/拟声改由管道可靠处理。
+      该文件仅存档参考，见 prompts/minimax_voice_style.md。
 
 结构：
-    prompts/personality.md    宠物人格（Markdown，直接改）
-    prompts/voice_style.md    语气输出要求（Markdown，直接改）
-    users/                    用户档案
-        registry.json          用户注册表（id/name/role/profile 路径）
-        user_001/profile.json  用户档案（basic + reply_style + likes/dislikes + daily）
+    prompts/personality.md           宠物人格（Markdown，直接改）
+    prompts/_archive/voice_style_legacy.md  旧 instructions 方案归档
+    users/                           用户档案
+        registry.json                  用户注册表（id/name/role/profile 路径）
+        user_001/profile.json          用户档案（basic + reply_style + likes/dislikes + daily）
     .env  ACTIVE_USER=user_001  当前启用哪个用户（暂时只启用 user_001）
 
-组装：build_system_prompt() = personality.md + voice_style.md + 当前用户档案
+组装：build_system_prompt() = agent.md + 用户档案 + 模式提示词 + 工具目录 + personality.md
+（注入顺序以 build_system_prompt 的 parts 列表为准，用户指定：通用准则→档案→模式→工具→人格）
 """
 
 import json
@@ -98,13 +103,24 @@ def load_user_profile(user_id: str) -> str:
 
 
 def build_system_prompt(mode: str | None = None) -> str:
-    """组装完整系统提示词：人格 + 语气 + 通用准则 + (模式专用) + 工具目录 + 用户档案
+    """组装完整系统提示词：通用准则→用户档案→模式提示词→工具目录→人格
 
     双模式（mode_state 的 CHAT_MODE / WORK_MODE）：
-        chat（闲聊，默认）：personality + voice_style + agent.md + chat_system_prompt.md + 闲聊工具目录
-        work（工作）       ：personality + voice_style + agent.md + work_system_prompt.md + 全量工具目录
+        chat（闲聊，默认）：agent.md + 用户档案 + chat_system_prompt.md + 闲聊工具目录 + personality.md
+        work（工作）       ：agent.md + 用户档案 + work_system_prompt.md + 全量工具目录 + personality.md
+    模式标注已写入模式提示词文件本身（chat_system_prompt.md / work_system_prompt.md），
+    不再由代码动态插入独立段（用户要求）。
     工具目录（build_catalog_md(mode)）为动态生成——按模式过滤，新增工具后自动出现。
     mode=None 时按闲聊处理（向后兼容无参调用）。
+
+    注入顺序（用户指定，2025-xx）：
+        1. agent.md（通用准则）
+        2. 用户档案（profile.json）
+        3. 模式提示词（含模式标注）
+        4. 工具目录
+        5. personality.md（人格放最后，作为收尾）
+
+    若后续要调整顺序，只改下面 parts 列表即可（文件内容不变）。
     """
     from tools import build_catalog_md
     from mode_state import CHAT_MODE, WORK_MODE
@@ -112,17 +128,11 @@ def build_system_prompt(mode: str | None = None) -> str:
     mode = mode or CHAT_MODE
     mode_prompt = "work_system_prompt.md" if mode == WORK_MODE else "chat_system_prompt.md"
 
-    # 显式标注当前模式：让 LLM 答"你现在是什么模式？"时能据实回答
-    mode_label = "工作模式" if mode == WORK_MODE else "闲聊模式"
-    mode_mark = f"## 当前模式\n你当前处于「{mode_label}」。\n用户若问你是什么模式，请直接回答：{mode_label}。若用户要切换模式，用【切换指令】处理，不要把它当普通聊天话题。"
-
     parts = [
-        load_prompt("personality.md"),
-        load_prompt("voice_style.md"),
-        load_prompt("agent.md"),            # 通用准则（原 system_prompt.md 改名 + 扩充）
-        load_prompt(mode_prompt),           # 模式专用提示词
-        build_catalog_md(mode),             # 第一级披露：按模式过滤的工具目录
-        mode_mark,
-        load_user_profile(get_active_user_id()),
+        load_prompt("agent.md"),            # 1. 通用准则（工具使用/记忆/输出限制）
+        load_user_profile(get_active_user_id()),  # 2. 用户档案（profile.json）
+        load_prompt(mode_prompt),           # 3. 模式专用提示词（含模式标注）
+        build_catalog_md(mode),             # 4. 工具目录（按模式过滤）
+        load_prompt("personality.md"),      # 5. 人格（最后收尾）
     ]
     return "\n\n".join(p for p in parts if p)

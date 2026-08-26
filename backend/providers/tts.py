@@ -42,6 +42,62 @@ class AliyunTTS(TTSProvider):
         """打断时调用：立即停止当前合成"""
         self.cancel_event.set()
 
+    # ── 朗读文本预处理：把 LLM 可能输出的特殊符号转成口语读法 ──
+    # 直接原样给 TTS，Qwen3-TTS 可能把 `+ - * / % ** ()` 等按字面/英文读（实测读出奇怪内容）。
+    # 这里在合成前做最小化清洗，避免改变语义：
+    #   · 数学运算符号 → 中文读法（3+5=8 → 三加五等于八）
+    #   · markdown 强调符号（**、*、#、`）→ 去除
+    #   · 列表符号（- 、* 、1. ）→ 去除（读列表语气词已由 LLM 输出）
+    #   · 括号内的英文/代码残留不易判断，只处理明确的数学场景
+    _SYMBOL_MAP = {
+        "+": "加",
+        "-": "减",
+        "*": "乘",
+        "/": "除以",
+        "=": "等于",
+        "%": "百分之",
+        "×": "乘",
+        "÷": "除以",
+        "＋": "加",
+        "－": "减",
+        "＝": "等于",
+        "＞": "大于",
+        "＜": "小于",
+        "≥": "大于等于",
+        "≤": "小于等于",
+        "≠": "不等于",
+    }
+
+    def _clean_text(self, text: str) -> str:
+        if not text:
+            return text
+        import re as _re
+        t = text
+        # 0) 数学运算先处理（保护 * / 等算符不被下面 markdown 删除误伤）
+        #    用较严正则避免误伤正文里的 "- "（列表）或 "a-b"（英文名）
+        #    注意中括号里的 * 要转义（正则特殊字符）
+        t = _re.sub(
+            r"(\d+(?:\.\d+)?)\s*([+*\-/×÷＋－＝=<>]{1,2})\s*(\d+(?:\.\d+)?)",
+            lambda m: f"{m.group(1)}{self._SYMBOL_MAP.get(m.group(2).strip(), m.group(2))}{m.group(3)}",
+            t,
+        )
+        # 1) markdown 符号（**加粗**、`code`、# 标题、~~删除~~、图片）→ 去除
+        t = _re.sub(r"`{1,3}|[#]{1,3}|\*{1,3}|_{1,3}|~{1,3}", "", t)
+        t = _re.sub(r"!\[[^\]]*\]\([^)]*\)", "", t)
+        # 3) 百分数：5% → 百分之五（把 % 移到数字前，读"百分之五"）
+        t = _re.sub(
+            r"(\d+(?:\.\d+)?)\s*%",
+            lambda m: f"百分之{m.group(1)}",
+            t,
+        )
+        # 4) 列表行首符号："- 第一点" / "* 第一点" / "1. 第一点" → 去掉符号保留内容
+        t = _re.sub(r"(?m)^[\s]*[-*•]\s+", "", t)
+        return t
+
+    @staticmethod
+    def _normalize_num(s: str) -> str:
+        return s  # 数字本身 Qwen 会读对，不需要转换；保留原样
+
     async def synth_stream(self, text: str, params: dict | None = None):
         """流式合成：边合成边 yield 音频块（PCM bytes）
 
@@ -77,7 +133,8 @@ class AliyunTTS(TTSProvider):
             volume = None
             pitch_rate = None
 
-        # ── 用户语音设置真实应用（voice:settings：音色→语气前缀；音量/音调→数值参数）──
+        # ── 用户语音设置真实应用（voice:settings：音色→真实音色 id + 语气前缀；音量/音调→数值参数）──
+        voice_id = VOICE_ID  # 默认音色（.env TTS_VOICE），应用失败时兜底
         try:
             from voice_settings import apply_to_tts_params
             merged = apply_to_tts_params({
@@ -88,6 +145,8 @@ class AliyunTTS(TTSProvider):
             instruction = merged.get("instructions") or instruction
             volume = merged.get("volume")
             pitch_rate = merged.get("pitch_rate")
+            # 用户选择的真实音色（voice:settings → voice_catalog 里的音色 id）
+            voice_id = merged.get("voice") or VOICE_ID
         except Exception as e:
             print(f"[tts] voice:settings 应用失败（忽略）: {e}")
 
@@ -143,15 +202,15 @@ class AliyunTTS(TTSProvider):
                 # 配置会话：音色、格式、语气指令 + 情绪数值参数（语速/音量/音调）
                 # SDK 对 None 参数不覆盖默认值（speech_rate/volume/pitch_rate 未设置时保持默认）
                 tts.update_session(
-                    voice=VOICE_ID,
+                    voice=voice_id,
                     response_format=AudioFormat.PCM_24000HZ_MONO_16BIT,  # 24kHz PCM
                     speech_rate=speech_rate,
                     volume=volume,
                     pitch_rate=pitch_rate,
                     instructions=instruction,
                 )
-                # 发送文本并提交
-                tts.append_text(text)
+                # 发送文本并提交（先清洗特殊符号 → 口语读法）
+                tts.append_text(self._clean_text(text))
                 tts.commit()
                 # 等待 done 信号（由 on_event 设置），不消费音频队列
                 done_event.wait(timeout=15)

@@ -187,26 +187,28 @@ function addFile(): void {
             <circle cx="16.5" cy="9" r="1" fill="currentColor" />
           </svg>
         </button>
-      </div>
 
-      <!-- 隐藏宠物开关（左移；右侧新增退出应用） -->
-      <button
-        type="button"
-        class="flex h-6 w-6 items-center justify-center rounded-md transition-colors duration-200 ease-expo-out"
-        :class="props.petVisible === false ? 'bg-accent/15 text-accent hover:bg-accent/20' : 'text-fg-secondary hover:bg-surface-2 hover:text-fg-primary active:bg-surface-3'"
-        :title="props.petVisible === false ? '显示宠物' : '隐藏宠物'"
-        @click="emit('hide-pet')"
-      >
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-          <path
-            d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"
-            stroke="currentColor"
-            stroke-width="1.8"
-          />
-          <circle v-if="props.petVisible !== false" cx="12" cy="12" r="2.5" stroke="currentColor" stroke-width="1.8" />
-          <path v-else d="M8 8l8 8M16 8l-8 8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
-        </svg>
-      </button>
+        <!-- 隐藏宠物（眼睛线条 icon，与其它按钮风格统一；紧邻皮肤按钮，间距一致） -->
+        <button
+          type="button"
+          class="flex h-6 w-6 items-center justify-center rounded-md transition-colors duration-200 ease-expo-out"
+          :class="props.petVisible === false ? 'bg-accent/15 text-accent hover:bg-accent/20' : 'text-fg-secondary hover:bg-surface-2 hover:text-fg-primary active:bg-surface-3'"
+          :title="props.petVisible === false ? '显示宠物' : '隐藏宠物'"
+          @click="emit('hide-pet')"
+        >
+          <!-- 可见：睁眼（点击隐藏）；已隐藏：闭眼+斜线（点击显示） -->
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path
+              d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"
+              stroke="currentColor"
+              stroke-width="1.8"
+              stroke-linejoin="round"
+            />
+            <circle v-if="props.petVisible !== false" cx="12" cy="12" r="2.5" stroke="currentColor" stroke-width="1.8" />
+            <path v-else d="M8 8l8 8M16 8l-8 8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+          </svg>
+        </button>
+      </div>
 
       <!-- 退出应用 -->
       <button

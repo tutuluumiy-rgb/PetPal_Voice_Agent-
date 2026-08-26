@@ -67,15 +67,12 @@ WRITE_TOOL = {
     "type": "function",
     "function": {
         "name": "write",
-        "description": (
-            "Write UTF-8 text to a file in the learning workspace. "
-            "Creates parent directories and overwrites an existing file."
-        ),
+        "description": "在工作区写入 UTF-8 文本文件；自动创建父目录，覆盖已存在文件。需要审批。",
         "parameters": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Workspace-relative or absolute file path"},
-                "content": {"type": "string", "description": "Complete UTF-8 file content"},
+                "path": {"type": "string", "description": "工作区相对路径或绝对路径"},
+                "content": {"type": "string", "description": "完整的 UTF-8 文件内容"},
             },
             "required": ["path", "content"],
             "additionalProperties": False,

@@ -1,5 +1,11 @@
 """语气风格与情绪指令映射（instruct 版）
 
+⚠️ 归档说明：这套「instructions 自然语言描述」方案已随 MiniMax Speech 2.8 接入而归档，
+   新语音控制见 prompts/minimax_voice_style.md（按 MiniMax 协议）。
+   本文件的 VOICE_GUIDE / EMOTION_INSTRUCTIONS 目前【仅剩阿里云 Qwen-TTS provider 在使用】
+   （TTS_PROVIDER=ali 时）。若是纯 MiniMax 场景，这两份可忽略，但删除会连带阿里云 provider，
+   故保留并标注归档。
+
 独立于 personality.py，专门管理「语音怎么表达情绪」。
 Qwen3-TTS-Instruct-Flash-Realtime 支持自然语言指令控制语气，
 这里把情绪标签映射成细腻的语气指令。

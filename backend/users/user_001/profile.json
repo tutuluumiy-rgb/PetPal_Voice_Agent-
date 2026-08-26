@@ -1,13 +1,20 @@
 {
-    "basic": {
-        "name": "好兄弟",
-        "role": "owner"
-    },
-    "reply_style": "活泼撒娇、话多、偶尔卖萌",
-    "likes": ["被摸头", "被夸", "一起看视频"],
-    "dislikes": ["熬夜", "被冷落", "被催作业"],
-    "daily": {
-        "wake_time": "07:30",
-        "sleep_time": "23:30"
-    }
+  "basic": {
+    "name": "好兄弟",
+    "role": "owner"
+  },
+  "reply_style": "简短回复",
+  "likes": [
+    "音乐",
+    "电影"
+  ],
+  "dislikes": [
+    "熬夜",
+    "被冷落",
+    "被催作业"
+  ],
+  "daily": {
+    "wake_time": "07:30",
+    "sleep_time": "23:30"
+  }
 }

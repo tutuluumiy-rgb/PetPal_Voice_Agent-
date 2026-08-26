@@ -13,6 +13,7 @@
 import time
 
 # 情绪 → TTS 参数（instruct 指令 + 数值参数）
+# ⚠️ instructions 字段：仅阿里云 Qwen-TTS 用（TTS_PROVIDER=ali）；MiniMax 只读 speech_rate/volume/pitch_rate/emotion
 # speech_rate: 语速 [0.5~2.0]；volume: 音量 [0~100]；pitch_rate: 音调 [0.5~2.0]
 EMOTION_PARAMS = {
     "开心": {
@@ -84,19 +85,30 @@ class EmotionState:
         return min(1.0, elapsed / DECAY_SECONDS)
 
     def get_tts_params(self) -> dict:
-        """返回当前 TTS 参数（含衰减插值：情绪参数 ↔ 平静参数 按衰减比例过渡）"""
+        """返回当前 TTS 参数（含衰减插值：情绪参数 ↔ 平静参数 按衰减比例过渡）
+        - 含 emotion 字段（中文情绪标签），供 TTS provider 精确映射情绪（MiniMax 等）
+        """
         cur = EMOTION_PARAMS.get(self.current, EMOTION_PARAMS["平静"])
         base = EMOTION_PARAMS["平静"]
         ratio = self._decay_ratio()
 
         if ratio <= 0:
-            return dict(cur)  # 完全保持当前情绪
+            out = dict(cur)
+            out["emotion"] = self.current
+            return out  # 完全保持当前情绪
         if ratio >= 1:
             self.current = "平静"  # 衰减完成，状态归位平静
-            return dict(base)
+            out = dict(base)
+            out["emotion"] = "平静"
+            return out
 
         # 线性插值：数值参数向平静过渡；instructions 保持当前情绪（语气描述不插值）
         params = dict(cur)
         for key in ("speech_rate", "volume", "pitch_rate"):
             params[key] = round(base[key] + (cur[key] - base[key]) * (1 - ratio), 2)
+        params["emotion"] = self.current
         return params
+
+    @property
+    def emotion_label(self) -> str:
+        return self.current

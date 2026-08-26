@@ -2,18 +2,17 @@
 /**
  * 侧边栏导航
  * 头部 = 品牌 logo（assets/logo.png）；底部 = 登录入口（点击展开菜单）：
- * 登录账户 / 帮助 / 退出应用 / 关于（关于页已从导航列表移入此处）。
+ * 登录账户 / 帮助 / 模型 / 退出应用 / 关于（关于、模型页已从导航列表移入此处）。
  */
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import LogoImg from './LogoImg.vue'
-
 export interface NavItem {
   key: string
   label: string
   icon: string
 }
 
-export type LoginMenuKind = 'login' | 'help' | 'quit' | 'about'
+export type LoginMenuKind = 'login' | 'help' | 'model' | 'quit' | 'about'
 
 defineProps<{
   items: NavItem[]
@@ -28,9 +27,24 @@ const emit = defineEmits<{
 // 登录菜单（点击外部关闭）
 const menuOpen = ref(false)
 
+// 宠物显示切换（圆点：绿=已显示，橙=已隐藏；点击切换）
+const petVisible = ref(true)
+let unsubPet: (() => void) | null = null
+function togglePet(): void {
+  window.api.setPetVisible(!petVisible.value)
+}
+onMounted(() => {
+  window.api.getPetVisible().then((v) => (petVisible.value = v)).catch(() => undefined)
+  unsubPet = window.api.onPetVisibleChanged((v) => (petVisible.value = v))
+})
+onBeforeUnmount(() => {
+  unsubPet?.()
+})
+
 const MENU_ITEMS = [
   { kind: 'login' as const, label: '登录账户' },
   { kind: 'help' as const, label: '帮助' },
+  { kind: 'model' as const, label: '模型' },
   { kind: 'quit' as const, label: '退出应用' },
   { kind: 'about' as const, label: '关于' }
 ]
@@ -59,6 +73,15 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
     <div class="flex items-center gap-2 px-2 pb-3 pt-1">
       <LogoImg :size="24" />
       <span class="text-[13px] font-semibold tracking-ds-tight text-fg-primary">PetPal</span>
+      <!-- 宠物显示切换：绿=已显示，橙=已隐藏（紧邻「PetPal」8px） -->
+      <button
+        type="button"
+        title="宠物显示"
+        @click="togglePet"
+        class="flex h-5 w-5 items-center justify-center rounded-full transition-colors duration-ds-sm ease-expo-out hover:bg-surface-2"
+      >
+        <span class="h-2.5 w-2.5 rounded-full shadow-ds-sm" :class="petVisible ? 'bg-[#22c55e]' : 'bg-[#f97316]'" />
+      </button>
     </div>
 
     <button
@@ -92,7 +115,7 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
                 :class="menuOpen ? 'rotate-180' : ''">▾</span>
         </button>
 
-        <!-- 登录菜单：登录账户 / 帮助 / 退出应用 / 关于 -->
+        <!-- 登录菜单：登录账户 / 帮助 / 模型 / 退出应用 / 关于 -->
         <div
           v-show="menuOpen"
           class="absolute bottom-[calc(100%+6px)] left-0 z-[10000] w-full overflow-hidden rounded-md border border-line-subtle bg-surface-1 shadow-ds-lg"

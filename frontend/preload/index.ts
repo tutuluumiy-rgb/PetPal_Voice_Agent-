@@ -17,10 +17,15 @@ import type {
   DragPoint,
   HistoryDetail,
   HistoryPage,
+  ModelCheckResult,
+  ModelConfig,
+  ModelListResp,
+  ModelSavePayload,
   PetMode,
   Skin,
   TtsEventPayload,
   UserProfile,
+  VoiceListResp,
   VoiceSettings,
   VoiceStatePayload
 } from './types'
@@ -189,6 +194,8 @@ const api: AppApi = {
     ipcRenderer.invoke(IPC_CH.historySearch, { keyword, page, pageSize }),
   historyDetail: (sessionId: string): Promise<HistoryDetail> =>
     ipcRenderer.invoke(IPC_CH.historyDetail, { sessionId }),
+  historyDelete: (sessionId: string): Promise<void> =>
+    ipcRenderer.invoke(IPC_CH.historyDelete, { sessionId }),
 
   personalityGet: (): Promise<{ content: string }> => ipcRenderer.invoke(IPC_CH.personalityGet),
   personalitySet: (content: string): Promise<void> => ipcRenderer.invoke(IPC_CH.personalitySet, String(content ?? '')),
@@ -198,6 +205,12 @@ const api: AppApi = {
   voiceSettingsGet: (): Promise<VoiceSettings> => ipcRenderer.invoke(IPC_CH.voiceSettingsGet),
   voiceSettingsSet: (settings: VoiceSettings): Promise<VoiceSettings> =>
     ipcRenderer.invoke(IPC_CH.voiceSettingsSet, settings),
+
+  voiceVoices: (): Promise<VoiceListResp> => ipcRenderer.invoke(IPC_CH.voiceVoices),
+  modelGet: (): Promise<ModelConfig> => ipcRenderer.invoke(IPC_CH.modelGet),
+  modelSet: (payload: ModelSavePayload): Promise<ModelConfig> => ipcRenderer.invoke(IPC_CH.modelSet, payload),
+  modelCheck: (): Promise<ModelCheckResult> => ipcRenderer.invoke(IPC_CH.modelCheck),
+  modelList: (type: string): Promise<ModelListResp> => ipcRenderer.invoke(IPC_CH.modelList, type),
 
   // ---------- 皮肤主题 ----------
   getSkin: (): Promise<Skin> => ipcRenderer.invoke(IPC_CH.skinGet),

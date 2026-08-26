@@ -114,13 +114,19 @@
 - 真实后端（`/ws/mgmt`）：`history:list` 按 `run_id` 聚合 `backend/sessions/*.jsonl`，
   `preview` 取该 run **首个 user 内容前 20 字 + …**；`history:detail` 返回该 run 的全部事件。
 
-### 3.3 人设 / 用户档案（markdown）
+### 3.3 人设 / 用户档案（v1.1：人设=markdown；用户=结构化 profile）
 
 ```
 personality:get → { "type":"personality:get:ok", "id", "content": "<markdown>" }
 personality:set → { "type":"personality:set", "id", "content": "<markdown>" } → ok
-user:get        → { "type":"user:get:ok", "id", "content": "<markdown>" }
-user:set        → { "type":"user:set", "id", "content": "<markdown>" } → ok
+user:get        → { "type":"user:get:ok", "id",
+                    "basic": {"name":"主人","role":"owner"},
+                    "reply_style":"活泼撒娇、话多",
+                    "likes":["被摸头"], "dislikes":["熬夜"],
+                    "daily":{"wake_time":"07:30","sleep_time":"23:30"} }
+user:set        → { "type":"user:set", "id", "profile": { 同上结构 } } → ok
+```
+- 用户档案为**结构化**（对应真实后端 `users/<ACTIVE_USER>/profile.json` 字段），不再用 markdown。
 ```
 
 ### 3.4 语音参数

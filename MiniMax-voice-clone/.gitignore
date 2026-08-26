@@ -1,0 +1,12 @@
+# 密钥
+.env
+
+# 生成的试听音频（体积可能很大，按需自行管理）
+audios/cloned_preview.mp3
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/

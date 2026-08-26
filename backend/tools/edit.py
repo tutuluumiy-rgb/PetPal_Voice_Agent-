@@ -89,22 +89,19 @@ EDIT_TOOL = {
     "type": "function",
     "function": {
         "name": "edit",
-        "description": (
-            "Apply exact text replacements to a UTF-8 file in the learning workspace. "
-            "Each old_text must match exactly once; ambiguous edits are rejected."
-        ),
+        "description": "对工作区内的文件做精确文本替换；每个 old_text 必须在文件中唯一匹配，命中多处将拒绝执行。需要审批。",
         "parameters": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Workspace-relative or absolute file path"},
+                "path": {"type": "string", "description": "工作区相对路径或绝对路径"},
                 "edits": {
                     "type": "array",
                     "minItems": 1,
                     "items": {
                         "type": "object",
                         "properties": {
-                            "old_text": {"type": "string", "description": "Exact existing text"},
-                            "new_text": {"type": "string", "description": "Replacement text"},
+                            "old_text": {"type": "string", "description": "要替换的现有原文"},
+                            "new_text": {"type": "string", "description": "替换后的新文本"},
                         },
                         "required": ["old_text", "new_text"],
                         "additionalProperties": False,

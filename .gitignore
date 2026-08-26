@@ -44,3 +44,6 @@ backend/dist/
 # ── 日志 ──
 *.log
 tmp/
+
+# DSH 运行时目录
+.dsh/

@@ -204,6 +204,12 @@ export function registerIpcHandlers(): void {
     return backendGateway.historyDetail(sessionId)
   })
 
+  // 删除历史会话
+  ipcMain.handle(IPC_CH.historyDelete, async (_event, payload: unknown): Promise<unknown> => {
+    const sessionId = String((payload as any)?.sessionId ?? '')
+    return backendGateway.historyDelete(sessionId)
+  })
+
   // 人设 / 用户档案
   ipcMain.handle(IPC_CH.personalityGet, async (): Promise<unknown> => backendGateway.personalityGet())
   ipcMain.handle(IPC_CH.personalitySet, async (_event, content: unknown): Promise<void> => {
@@ -221,11 +227,30 @@ export function registerIpcHandlers(): void {
     return backendGateway.voiceSettingsSet({
       volume: Math.max(0, Math.min(100, Number(s.volume) || 0)),
       pitch: Math.max(0, Math.min(100, Number(s.pitch) || 0)),
-      voice: (['default', 'cute', 'calm', 'bright'] as const).includes(s.voice as any)
-        ? (s.voice as 'default' | 'cute' | 'calm' | 'bright')
-        : 'default',
+      voice: String(s.voice ?? 'default'),
     })
   })
+
+  // 音色列表 / 模型配置
+  ipcMain.handle(IPC_CH.voiceVoices, async (): Promise<unknown> => backendGateway.voiceVoices())
+  ipcMain.handle(IPC_CH.modelGet, async (): Promise<unknown> => backendGateway.modelGet())
+  ipcMain.handle(IPC_CH.modelSet, async (_event, payload: unknown): Promise<unknown> => {
+    const p = (payload ?? {}) as { sections?: Record<string, Record<string, unknown>> }
+    const sections: Record<string, { url?: string; api_key?: string; model?: string; voice?: string }> = {}
+    for (const [typ, sec] of Object.entries(p.sections ?? {})) {
+      if (!sec || typeof sec !== 'object') continue
+      const s: { url?: string; api_key?: string; model?: string; voice?: string } = {}
+      if (typeof sec.url === 'string') s.url = sec.url
+      if (typeof sec.api_key === 'string') s.api_key = sec.api_key
+      if (typeof sec.model === 'string') s.model = sec.model
+      if (typeof sec.voice === 'string') s.voice = sec.voice
+      sections[typ] = s
+    }
+    return backendGateway.modelSet({ sections })
+  })
+  ipcMain.handle(IPC_CH.modelCheck, async (): Promise<unknown> => backendGateway.modelCheck())
+  ipcMain.handle(IPC_CH.modelList, async (_event, type: unknown): Promise<unknown> =>
+    backendGateway.modelList(String(type ?? '')))
 
   // ---------- 宠物动画诊断（渲染进程上报 → 主进程终端日志，排查素材加载/过渡播放） ----------
   ipcMain.on(IPC_CH.animDebug, (_event, message: unknown): void => {

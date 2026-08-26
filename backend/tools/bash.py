@@ -176,16 +176,14 @@ BASH_TOOL = {
     "function": {
         "name": "bash",
         "description": (
-            "Execute a Bash command in the learning workspace. "
-            f"Output is truncated to the last {DEFAULT_MAX_LINES} lines or {DEFAULT_MAX_BYTES} bytes; "
-            f"the process is stopped after {MAX_BASH_OUTPUT_BYTES} captured bytes, "
-            "and captured output is saved for later inspection. This action requires approval."
+            f"在工作区内执行 Bash 命令。输出截断保留末尾 {DEFAULT_MAX_LINES} 行/{DEFAULT_MAX_BYTES} 字节；"
+            f"捕获超过 {MAX_BASH_OUTPUT_BYTES} 字节会中止进程，完整输出保存供后续查看。此操作需要审批。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "command": {"type": "string", "description": "Bash command to execute"},
-                "timeout": {"type": "number", "description": "Timeout in seconds, default 20, maximum 120"},
+                "command": {"type": "string", "description": "要执行的 Bash 命令"},
+                "timeout": {"type": "number", "description": "超时秒数，默认 20，最大 120"},
             },
             "required": ["command"],
             "additionalProperties": False,

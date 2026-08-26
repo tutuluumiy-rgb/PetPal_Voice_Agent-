@@ -81,12 +81,21 @@ def _tool_calls_serializable(tool_calls) -> list:
     raw = []
     for tc in tool_calls:
         if isinstance(tc, dict):
-            raw.append(tc)
+            # dict 来源 = 流式累积的 stream_tools（{"id", "function": {...}}），
+            # 缺 OpenAI 要求的顶层 `type: "function"`；补上，否则回填 assistant 消息时
+            # 服务端报 `missing field 'type'` → 第二轮 LLM 400 → 工具链断（实测）
+            out = dict(tc)
+            if "type" not in out:
+                out["type"] = "function"
+            fn = out.get("function")
+            if isinstance(fn, dict) and fn.get("arguments") is None:
+                fn["arguments"] = "{}"
+            raw.append(out)
             continue
         raw.append({
             "id": tc.id,
             "type": "function",
-            "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+            "function": {"name": tc.function.name, "arguments": tc.function.arguments or "{}"},
         })
     return raw
 
@@ -120,11 +129,21 @@ async def _execute_tool_calls(calls, mode) -> list:
 
         async def _one(c):
             async with sem:
-                return await execute_tool(c[1], c[2], mode)
+                try:
+                    return await execute_tool(c[1], c[2], mode)
+                except Exception as e:
+                    # 工具执行异常 → 兜底为错误文本（不抛）
+                    # 否则 asyncio.gather 默认会整体抛异常 → 本轮 executed 缺失
+                    # → assistant(tool_calls) 无对应 tool 消息 → 下一轮 LLM 400
+                    # `An assistant message with 'tool_calls' must be followed by tool messages...`
+                    return f"错误：工具 {c[1]} 执行异常（{type(e).__name__}: {e}）"
 
         tasks = [_one(c) for c in batch]
-        texts = await asyncio.gather(*tasks)
+        # return_exceptions=True：单个工具失败不影响其他调用，保证每个 call_id 都有结果
+        texts = await asyncio.gather(*tasks, return_exceptions=True)
         for k, (c, t) in enumerate(zip(batch, texts)):
+            if isinstance(t, Exception):
+                t = f"错误：工具 {c[1]} 执行异常（{type(t).__name__}: {t}）"
             results[i + k] = (c[0], t)
         i = j
     return results
@@ -453,8 +472,17 @@ async def run_agent_loop(
                 # 防御：单轮工具调用过多
                 pass
             executed = await _execute_tool_calls(normalized, mode)
-            for cid, result in executed:
+            # 按 call_id 映射回工具名（normalized 顺序与 executed 可能不同），给每个调用发 end 回调
+            name_by_cid = {cid: name for cid, name, _args in normalized}
+            result_by_cid = {cid: res for cid, res in executed}
+            # ⚠️ 必要：assistant(tool_calls) 的每个 call_id 都必须有紧随的 tool 结果消息，
+            # 否则下一轮 LLM 请求报 400 「insufficient tool messages following tool_calls」。
+            # 遍历 normalized（不是 executed），缺结果的用兜底文本，保证消息齐全。
+            for cid, name, _args in normalized:
+                result = result_by_cid.get(cid, "（工具结果缺失）")
                 session.add("tool", result, run_id=run_id, sub_turn=sub_turn, tool_call_id=cid)
+                if on_tool:
+                    await on_tool("end", name_by_cid.get(cid, "?"), cid, result)
             sub_turn += 1
             continue
         break

@@ -315,9 +315,9 @@ npm start            # electron-vite preview（预览构建产物）
 - 前端只允许改 `frontend/` 目录；**禁止改动** `backend/`、`testboard/`、根目录 `docs/`；
   前后端协议/字段/端口不变更。
 - 不提交模型文件（`.onnx`/`.wasm`）、`.env`、密钥（已 gitignore）。
-- 诊断日志约定（调试时输出格式）：
-  - `[win:*]`（logSizes）、`[pet:resize]`/`[pet:move]`、`[pet:force-resize]`、
-    `[pet-canvas]`、`[pet]`、`[chat:resize]`/`[chat:move]`、`[chat:*]`。
+- 诊断日志：**窗口尺寸/移动类日志已移除**（`[pet:resize/move]`、`[chat:*]`、`[win:*]`、
+  `[pet-canvas]` 等历史调试前缀不再使用；尺寸锁定逻辑保留、只静默执行）。保留的日志前缀：
+  `[gw]`（网关）、`[kws]`（唤醒词）、`[pet-anim]`（动画素材/过渡诊断）、`[voice]`、`[app]`。
 
 ---
 
@@ -349,8 +349,8 @@ npm start            # electron-vite preview（预览构建产物）
 ## 9. 控制面板对接与 UI 改造（已完成一批）
 
 - **右下角操作栏**：`renderer/app/panelActions.ts` 单例注册页面动作，`PanelShell` 右下渲染
-  （右 30/底 25、50×27、圆角 6、并排；撤销=次钮、保存=主钮）；人设/用户档案/语音参数页
-  已注册，页内保存按钮移除。
+  （右 10/底 10、50×27、圆角 6、并排；撤销=次钮、保存=主钮；人设/用户档案/语音参数/模型页
+  已注册，页内保存按钮移除）。
 - **历史按 session 抽屉（事件可折叠）**：`history:list` 一次性对话=一个条目（session 粒度，标题=日期+首输入前 20 字+…，
   显示消息数/轮数），展开调 `history:detail` 渲染该会话的事件轨迹时间线
   （user/assistant/tool/tool_result，按 ts 升序；runId 变化时按「轮」分段）。
@@ -358,8 +358,9 @@ npm start            # electron-vite preview（预览构建产物）
 - **语音状态指示灯**：宠物消息条左侧原 🎙 改为**圆点**——待机/超时断开=橙、唤醒后聆听/回复=绿、
   未启用=灰（`voice-state` 广播：ChatPanel → 主进程 → 宠物窗口）。
 - **新建会话**：①对话面板头部「语音开关右侧、关闭左侧」新增「＋」按钮（清空消息+重连语音后端，
-  后端按连接建新会话）；②口语「创建新对话/新建会话/换个话题/重新开始对话…」命中同样触发
-  （`VoicePipeline.newSession()`，`NEW_SESSION_WORDS` 词表可扩充）。
+  后端按连接建新会话）；②口语「创建新对话/新建会话/重新开始对话/清除记忆…」命中同样触发
+  （`VoicePipeline.newSession()`，`NEW_SESSION_WORDS` 词表可扩充）；「换个话题/换一个话题/开始新话题」
+  等**换话题**类口语只表示聊点别的，**不**清空上下文、不触发新建会话。
 - **消息条滚动按播报速度**：`PetWindow.marqueeDuration = 字数 / 4 字每秒`（clamp 4~30s），
   滚动节奏与语音播报一致；文本变化重挂载动画（`:key="voiceText"`）。
 - **页面介绍为功能描述**：人设/用户档案/语音参数/历史/动画生成页的副标题与保存提示均改为
@@ -377,3 +378,20 @@ npm start            # electron-vite preview（预览构建产物）
   （选项文案：深色 / 浅色，不备注配色）；主进程 `skin` 状态+广播+`userData/skin.json` 持久化。
 - **logo 统一**：`LogoImg.vue` 使用 `assets/logo.png`（SidebarNav 头部/关于/登录占位）。
 - **隐藏宠物开关**：ChatPanel 维护 `petVisible`（get/set + 订阅广播），按钮可隐藏又可恢复。
+- **音色按模型实时拉取**：语音参数设置的「音色」下拉不再硬编码，改为 `voice:voices` 按当前 TTS
+  模型实时返回 `{ model, current, voices }`；`voice` 存储真实音色 id（`voice_catalog.py`），
+  `apply_to_tts_params` 把选定音色真的写进 TTS `voice` 参数（覆盖 `.env TTS_VOICE`）。
+  旧 default/cute/calm/bright 作为「语气预设」保留兼容（不设真实音色时回退 `.env TTS_VOICE`）。
+- **模型配置页（经左下登录菜单「模型」进入）**：`ModelView.vue` 按「图像设置」版式做 5 组配置
+  （大语言模型 / ASR / TTS / 识图 / 视频），每组：API 地址 + API Key + 模型 ID + ↻获取可用模型
+  （TTS 另附音色/说话人；ASR/TTS 提示仅支持 *-realtime）。`model:get` 读回各组（密钥只回掩码）、
+  `model:list{category}` 返回该组可用模型目录（点选填充模型 ID）、`model:check` 检查各组密钥就绪
+  + best-effort LLM 连通性；右下角「撤销/保存」`model:set` 写回后端 `.env`（`model_config.py`，
+  保留注释/未动键，缺失追加；保存后需重启后端生效）。LLM/ASR 支持 Base URL 覆盖
+  （`DEEPSEEK_BASE_URL` / `QWEN_LLM_BASE_URL` / `ASR_BASE_URL`），TTS 仅存 `TTS_BASE_URL` 供参考。
+  主进程新增 IPC：`voice:voices`、`model:get`、`model:set`、`model:check`、`model:list`、
+  `history:delete`（网关已代理）。
+- **历史删除会话**：`HistoryView` 查询旁新增「删除会话」→ 进入选择模式（会话条出现圆点，点选多选）
+  → 右下角「确认删除」（保存按钮位置）调用 `history:delete` 删除 `sessions/<id>.jsonl` 后刷新。
+- **宠物显示开关移到侧边栏头部**：`SidebarNav` 头部 Logo + PetPal 旁新增圆点按钮（绿=已显示、
+  橙=已隐藏，点击切换，订阅 `pet:visible-changed`），`AnimationGenView` 的宠物显示卡片已移除。

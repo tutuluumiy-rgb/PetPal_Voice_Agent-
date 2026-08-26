@@ -17,7 +17,17 @@
  * 本类保持纯净：不 import electron，便于写独立 probe 脚本联调验证。
  */
 import WebSocket from 'ws'
-import type { HistoryPage, HistoryDetail, UserProfile, VoiceSettings } from '../../preload/types'
+import type {
+  HistoryPage,
+  HistoryDetail,
+  UserProfile,
+  VoiceSettings,
+  VoiceListResp,
+  ModelConfig,
+  ModelSavePayload,
+  ModelCheckResult,
+  ModelListResp
+} from '../../preload/types'
 
 /** 网关连接状态 */
 export type GatewayStatus = 'connecting' | 'connected' | 'disconnected'
@@ -83,6 +93,7 @@ export interface GatewayClientOptions {
 
 export class GatewayClient {
   private ws: WebSocket | null = null
+  private primaryUrl: string
   private url: string
   private fallbackUrl: string | null
   private fallbackAfterAttempts: number
@@ -109,6 +120,7 @@ export class GatewayClient {
   private lastStatusAt = 0
 
   constructor(url: string, opts: GatewayClientOptions = {}) {
+    this.primaryUrl = url
     this.url = url
     this.fallbackUrl = opts.fallbackUrl ?? null
     this.fallbackAfterAttempts = opts.fallbackAfterAttempts ?? 2
@@ -203,11 +215,16 @@ export class GatewayClient {
     const wait = Math.min(30_000, 1000 * 2 ** this.reconnectAttempt)
     this.reconnectAttempt += 1
     this._setStatus('disconnected')
-    // 主后端持续不可达 → 切换备用（Mock 9000），下次直接连备用
+    // 主后端连续不可达 → 切备用（Mock 9000）；备用也持续不可达 → 回主后端重试。
+    // 防止“粘死在备用地址”上：主后端恢复后能自动接回，无需重启 App。
     if (this.fallbackUrl && this.url !== this.fallbackUrl && this.reconnectAttempt >= this.fallbackAfterAttempts) {
       this.url = this.fallbackUrl
       this.reconnectAttempt = 0
       console.log(`[gw] primary backend unreachable, fallback to ${this.url}`)
+    } else if (this.fallbackUrl && this.url === this.fallbackUrl && this.reconnectAttempt >= this.fallbackAfterAttempts) {
+      this.url = this.primaryUrl
+      this.reconnectAttempt = 0
+      console.log(`[gw] fallback unreachable, back to primary ${this.url}`)
     } else {
       console.log(`[gw] reconnect in ${wait}ms (attempt ${this.reconnectAttempt})`)
     }
@@ -385,6 +402,23 @@ export class GatewayClient {
       return
     }
 
+    // ── 通用错误帧：后端用 _.error / _:error 返回（未知类型、校验失败等）──
+    // 按 id 关联拒绝挂起的请求，避免「后端报错但前端一直等到超时」。
+    if (t === '_.error' || t === '_:error') {
+      const eid = msg.id
+      if (typeof eid === 'string') {
+        const p = this.pending.get(eid)
+        if (p) {
+          clearTimeout(p.timer)
+          this.pending.delete(eid)
+          this.activeChats.delete(eid)
+          this.chatStreams.delete(eid)
+          p.reject(new Error(`${msg.code ?? 'E_UNKNOWN'}: ${msg.message ?? '请求失败'}`))
+        }
+      }
+      return
+    }
+
     // ── 通用请求关联 ──
     const id = msg.id
     if (id == null || typeof id !== 'string') return
@@ -446,6 +480,11 @@ export class GatewayClient {
     return this.request('history:detail', { sessionId }) as Promise<HistoryDetail>
   }
 
+  /** history:delete — 删除一个历史会话 */
+  historyDelete(sessionId: string): Promise<RpcResult> {
+    return this.request('history:delete', { sessionId })
+  }
+
   personalityGet(): Promise<{ content: string }> {
     return this.request('personality:get')
   }
@@ -472,6 +511,31 @@ export class GatewayClient {
       pitch: settings.pitch,
       voice: settings.voice,
     }) as Promise<VoiceSettings>
+  }
+
+  /** voice:voices — 按当前 TTS 模型实时拉取音色列表 */
+  voiceVoices(): Promise<VoiceListResp> {
+    return this.request('voice:voices') as Promise<VoiceListResp>
+  }
+
+  /** model:get — 读取当前模型配置 + 所需 API 密钥状态 */
+  modelGet(): Promise<ModelConfig> {
+    return this.request('model:get') as Promise<ModelConfig>
+  }
+
+  /** model:set — 保存模型配置（写回后端 .env） */
+  modelSet(payload: ModelSavePayload): Promise<ModelConfig> {
+    return this.request('model:set', { ...payload }) as Promise<ModelConfig>
+  }
+
+  /** model:check — 检查模型配置（密钥就绪 + best-effort 连通性） */
+  modelCheck(): Promise<ModelCheckResult> {
+    return this.request('model:check') as Promise<ModelCheckResult>
+  }
+
+  /** model:list — 获取某组（llm/asr/tts/vision/video）的可用模型 */
+  modelList(category: string): Promise<ModelListResp> {
+    return this.request('model:list', { category }) as Promise<ModelListResp>
   }
 
   modeGet(): Promise<{ mode: 'chat' | 'work' }> {

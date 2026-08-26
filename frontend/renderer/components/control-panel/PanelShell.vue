@@ -5,7 +5,7 @@
  * - 分层背景：径向渐变底层 + noise 纹理（ds-layered-bg / ds-noise-overlay）
  * - 页面入场：scale-in 动画（300ms，expo-out）
  * - 6 个页面按需切换（KeepAlive 保留状态）
- * - 右下角：版本/产品标识（小字）+ 页面级动作操作栏（50×27 圆角按钮，右 30 底 25）
+ * - 右下角：版本/产品标识（小字）+ 页面级动作操作栏（50×27 圆角按钮，右 10 底 10）
  */
 import { onMounted, ref } from 'vue'
 import type { NavItem, LoginMenuKind } from './SidebarNav.vue'
@@ -13,6 +13,7 @@ import SidebarNav from './SidebarNav.vue'
 import AboutView from './views/AboutView.vue'
 import AnimationGenView from './views/AnimationGenView.vue'
 import HistoryView from './views/HistoryView.vue'
+import ModelView from './views/ModelView.vue'
 import PersonalityView from './views/PersonalityView.vue'
 import UserProfileView from './views/UserProfileView.vue'
 import VoiceSettingsView from './views/VoiceSettingsView.vue'
@@ -31,6 +32,7 @@ const activeKey = ref('history')
 
 // TODO: 后续迭代实现 — 从主进程读取已保存的默认页
 function onSelect(key: string): void {
+  if (activeKey.value === key) return
   activeKey.value = key
   // 切页时清空上页注册的操作栏动作（KeepAlive 不会触发上页 onBeforeUnmount）
   clearPanelActions()
@@ -42,6 +44,7 @@ let noticeTimer: ReturnType<typeof setTimeout> | null = null
 function onMenu(kind: LoginMenuKind): void {
   if (kind === 'login') showNotice('登录功能即将上线')
   else if (kind === 'help') showNotice('帮助文档即将上线')
+  else if (kind === 'model') activeKey.value = 'model'
   else if (kind === 'quit') window.api.quitApp()
   else activeKey.value = 'about'
 }
@@ -80,6 +83,7 @@ onMounted(() => {
           <AnimationGenView v-else-if="activeKey === 'animation'" />
           <PersonalityView v-else-if="activeKey === 'personality'" />
           <UserProfileView v-else-if="activeKey === 'profile'" />
+          <ModelView v-else-if="activeKey === 'model'" />
           <AboutView v-else />
         </KeepAlive>
       </div>
@@ -95,8 +99,8 @@ onMounted(() => {
         </div>
       </transition>
 
-      <!-- 页面动作操作栏（右下角：右 30 / 底 25，50×27 圆角，并排） -->
-      <div v-if="panelActions.length" class="absolute flex items-center gap-2" style="right: 30px; bottom: 25px">
+      <!-- 页面动作操作栏（右下角：右 10 / 底 10，50×27 圆角，并排） -->
+      <div v-if="panelActions.length" class="absolute flex items-center gap-2" style="right: 10px; bottom: 10px">
         <button
           v-for="act in panelActions"
           :key="act.key"

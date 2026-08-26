@@ -12,7 +12,7 @@
  */
 import { BrowserWindow } from 'electron'
 import { IPC_CH } from '../../preload/types'
-import type { PetMode, AuthPolicy, HistoryPage, HistoryDetail, UserProfile, VoiceSettings } from '../../preload/types'
+import type { PetMode, AuthPolicy, HistoryPage, HistoryDetail, UserProfile, VoiceSettings, VoiceListResp, ModelConfig, ModelSavePayload, ModelCheckResult, ModelListResp } from '../../preload/types'
 import { getAuthPolicy, getMode, setMode, setAuthPolicy } from '../state'
 import { GatewayClient } from './gateway'
 import type { ChatStreamEvents } from './gateway'
@@ -95,6 +95,11 @@ class BackendGateway {
     return this.client.historyDetail(sessionId)
   }
 
+  /** 删除一个历史会话 */
+  historyDelete(sessionId: string): Promise<unknown> {
+    return this.client.historyDelete(sessionId)
+  }
+
   // ---------- 人设 / 用户档案 ----------
 
   personalityGet(): Promise<{ content: string }> {
@@ -121,6 +126,28 @@ class BackendGateway {
 
   voiceSettingsSet(settings: VoiceSettings): Promise<VoiceSettings> {
     return this.client.voiceSettingsSet(settings)
+  }
+
+  // ---------- 音色列表 / 模型配置 ----------
+
+  voiceVoices(): Promise<VoiceListResp> {
+    return this.client.voiceVoices()
+  }
+
+  modelGet(): Promise<ModelConfig> {
+    return this.client.modelGet()
+  }
+
+  modelSet(payload: ModelSavePayload): Promise<ModelConfig> {
+    return this.client.modelSet(payload)
+  }
+
+  modelCheck(): Promise<ModelCheckResult> {
+    return this.client.modelCheck()
+  }
+
+  modelList(type: string): Promise<ModelListResp> {
+    return this.client.modelList(type)
   }
 
   // ---------- 模式 / 权限（网关优先，未连接回退本地状态） ----------

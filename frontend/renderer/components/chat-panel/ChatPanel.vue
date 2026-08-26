@@ -12,7 +12,7 @@
  * - 语音管线（VoicePipeline：8001 /ws/audio + KWS 唤醒待机）
  * - 双皮肤（深色默认 / 浅色白底黑字）：html[data-skin] token 切换
  */
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { AuthPolicy, PetMode, Skin, VoiceUiState } from '../../../preload/types'
 import ChatInputBar from '../pet-window/ChatInputBar.vue'
 import { VoicePipeline } from '../../app/voice/VoicePipeline'
@@ -23,9 +23,16 @@ interface ChatMessage {
   text: string
 }
 
-const messages = ref<ChatMessage[]>([
-  { role: 'pet', text: '你好呀，我是西西！有什么想聊的？' }
-])
+const messages = ref<ChatMessage[]>([])
+// 消息区自动滚到底部（新增消息时）
+const msgBox = ref<HTMLElement | null>(null)
+watch(
+  () => messages.value.length,
+  async () => {
+    await nextTick()
+    if (msgBox.value) msgBox.value.scrollTop = msgBox.value.scrollHeight
+  },
+)
 
 function pushMessage(role: ChatMessage['role'], text: string): void {
   messages.value = [...messages.value, { role, text }]
@@ -46,9 +53,9 @@ function sendVoiceState(s: VoiceUiState): void {
   window.api.voiceState({ state: s })
 }
 
-/** 新建会话（UI 侧）：清空消息与文本对话草稿，显示提示 */
+/** 新建会话（UI 侧）：清空消息与文本对话草稿（保持窗口干净，不显示提示语） */
 function uiNewSession(): void {
-  messages.value = [{ role: 'pet', text: '好的，我们开启一段新对话吧～（已清空上下文）' }]
+  messages.value = []
   window.api.pushVoicePreview('')
   draftIndex = -1
   running.value = false
@@ -435,8 +442,12 @@ onBeforeUnmount(() => {
           title="新建会话"
           @click="newSessionClick"
         >
-          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
-            <path d="M6 1.5v9M1.5 6h9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <!-- 笔记本：圆角封面 + 左书脊 -->
+            <rect x="3.4" y="4.4" width="12.4" height="15.2" rx="2.4" />
+            <path d="M7.2 7.2v9.6" />
+            <!-- 铅笔：斜搭在本子上，笔尖朝下偏左 -->
+            <path d="M18.9 4.6l1.6 1.6-6.9 6.9-2.2.6.6-2.2z" />
           </svg>
         </button>
         <button
@@ -454,7 +465,7 @@ onBeforeUnmount(() => {
 
     <!-- 消息区 + 输入区 -->
     <div class="flex min-h-0 flex-1 flex-col">
-      <div class="min-h-0 flex-1 overflow-y-auto px-3 py-2">
+      <div ref="msgBox" class="min-h-0 flex-1 overflow-y-auto px-3 py-2">
         <div v-for="(m, i) in messages" :key="i" class="mb-1.5 text-[13px] leading-5">
           <template v-if="m.role === 'user'">
             <span class="font-medium text-fg-primary">你：</span><span class="text-fg-secondary">{{ m.text }}</span>

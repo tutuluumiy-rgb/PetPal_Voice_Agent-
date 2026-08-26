@@ -44,7 +44,7 @@ STATE = {
         "dislikes": ["熬夜", "被冷落"],
         "daily": {"wake_time": "07:30", "sleep_time": "23:30"},
     },
-    "voice": {"volume": 80, "pitch": 50, "voice": "default"},
+    "voice": {"volume": 80, "pitch": 50, "voice": "Mochi"},
     "history": [
         {"sessionId": "mock-s1", "time": int(time.time() * 1000) - 60_000, "preview": "你好西西，今天天气怎么样？",
          "msgCount": 6, "runCount": 2},
@@ -218,6 +218,15 @@ async def ws_endpoint(ws: WebSocket):
                 await _send(ws, {"type": "history:detail:ok", "id": mid, "sessionId": sid,
                                  "title": f"{_fmt_mock_time((item or {}).get('time', 0))} {preview[:20]}",
                                  "events": events})
+            elif mtype == "history:delete":
+                sid = msg.get("sessionId") or ""
+                before = len(STATE["history"])
+                STATE["history"] = [h for h in STATE["history"] if h.get("sessionId") != sid]
+                if len(STATE["history"]) != before:
+                    await _send(ws, {"type": "history:delete:ok", "id": mid, "sessionId": sid})
+                else:
+                    await _send(ws, {"type": "history:delete:error", "id": mid, "code": "E_NOT_FOUND",
+                                     "message": "session 不存在"})
             # ── 人设 / 用户档案 ──
             elif mtype == "personality:get":
                 await _send(ws, {"type": "personality:get:ok", "id": mid, "content": STATE["personality"]})
@@ -243,9 +252,76 @@ async def ws_endpoint(ws: WebSocket):
                     STATE["voice"]["volume"] = int(v)
                 if isinstance(p, (int, float)):
                     STATE["voice"]["pitch"] = int(p)
-                if vc in ("default", "cute", "calm", "bright"):
+                if vc:
                     STATE["voice"]["voice"] = vc
                 await _send(ws, {"type": "voice:settings:set:ok", "id": mid, **STATE["voice"]})
+            # ── 音色列表（mock）──
+            elif mtype == "voice:voices":
+                await _send(ws, {"type": "voice:voices:ok", "id": mid,
+                                 "model": STATE.get("tts_model", "qwen3-tts-instruct-flash-realtime"),
+                                 "current": STATE["voice"].get("voice", "Mochi"),
+                                 "voices": [
+                                     {"id": "Cherry", "label": "Cherry · 甜美女声"},
+                                     {"id": "Serena", "label": "Serena · 温柔女声"},
+                                     {"id": "Mochi", "label": "Mochi · 沙小弥"},
+                                 ]})
+            # ── 模型配置（mock，5 组）──
+            elif mtype == "model:get":
+                await _send(ws, {"type": "model:get:ok", "id": mid, **STATE.setdefault("model", {
+                    "llm": {"type": "llm", "label": "大语言模型", "hint": "", "sub": "Qwen（百炼）",
+                            "url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen-flash",
+                            "api_key_set": True, "api_key_env": "QWEN_LLM_API_KEY", "api_key_masked": "sk-****4A1w"},
+                    "asr": {"type": "asr", "label": "ASR", "hint": "仅支持 *-realtime 流式识别模型", "sub": "阿里云 Qwen3-ASR",
+                            "url": "wss://dashscope.aliyuncs.com/api-ws/v1/realtime", "model": "qwen3-asr-flash-realtime",
+                            "api_key_set": True, "api_key_env": "ASR_API_KEY", "api_key_masked": "sk-****5T7Z"},
+                    "tts": {"type": "tts", "label": "TTS", "hint": "仅支持 *-realtime 流式合成模型", "sub": "阿里云 Qwen3-TTS",
+                            "url": "https://dashscope.aliyuncs.com", "model": "qwen3-tts-instruct-flash-realtime",
+                            "voice": "Mochi", "api_key_set": True, "api_key_env": "DASHSCOPE_API_KEY", "api_key_masked": "sk-****Ndgc"},
+                    "vision": {"type": "vision", "label": "识图模型", "hint": "用于普通图片消息的识图服务", "sub": "智谱 GLM 视觉",
+                               "url": "https://open.bigmodel.cn/api/paas/v4", "model": "glm-4.6v-flash",
+                               "api_key_set": False, "api_key_env": "VISION_API_KEY", "api_key_masked": ""},
+                    "video": {"type": "video", "label": "视频模型", "hint": "视频 Base URL 需以 /v1 结尾，例如 https://api.example.com/v1", "sub": "",
+                              "url": "https://api.example.com/v1", "model": "",
+                              "api_key_set": False, "api_key_env": "VIDEO_API_KEY", "api_key_masked": ""},
+                })})
+            elif mtype == "model:set":
+                STATE["model"] = STATE.get("model", {})
+                sec = msg.get("sections") if isinstance(msg.get("sections"), dict) else {}
+                for typ, s in sec.items():
+                    base = STATE["model"].setdefault(typ, {})
+                    for f in ("url", "api_key", "model", "voice"):
+                        if f in s:
+                            base[f] = s[f]
+                await _send(ws, {"type": "model:set:ok", "id": mid, **STATE["model"]})
+            elif mtype == "model:check":
+                await _send(ws, {"type": "model:check:ok", "id": mid,
+                                 "ok": False,
+                                 "checks": [
+                                     {"key": "QWEN_LLM_API_KEY", "label": "大语言模型 · API Key", "status": "ok",
+                                      "detail": "sk-****4A1w", "model": "qwen-flash"},
+                                     {"key": "ASR_API_KEY", "label": "ASR · API Key", "status": "ok",
+                                      "detail": "sk-****5T7Z", "model": "qwen3-asr-flash-realtime"},
+                                     {"key": "DASHSCOPE_API_KEY", "label": "TTS · API Key", "status": "ok",
+                                      "detail": "sk-****Ndgc", "model": "qwen3-tts-instruct-flash-realtime"},
+                                     {"key": "VISION_API_KEY", "label": "识图模型 · API Key", "status": "missing",
+                                      "detail": "需要填写，否则该服务会失败", "model": "glm-4.6v-flash"},
+                                     {"key": "VIDEO_API_KEY", "label": "视频模型 · API Key", "status": "missing",
+                                      "detail": "需要填写，否则该服务会失败", "model": ""},
+                                 ],
+                                 "live": {"status": "ok", "detail": "连通正常（mock）", "latency_ms": 0},
+                                 "required": ["QWEN_LLM_API_KEY", "ASR_API_KEY", "DASHSCOPE_API_KEY",
+                                              "VISION_API_KEY", "VIDEO_API_KEY"]})
+            elif mtype == "model:list":
+                _MODELS = {
+                    "llm": [{"id": "qwen-flash", "label": "Qwen · qwen-flash"}, {"id": "deepseek-v4-flash", "label": "DeepSeek · deepseek-v4-flash"}],
+                    "asr": [{"id": "qwen3-asr-flash-realtime", "label": "qwen3-asr-flash-realtime（流式）"}],
+                    "tts": [{"id": "qwen3-tts-instruct-flash-realtime", "label": "qwen3-tts-instruct-flash-realtime（流式·指令）"}],
+                    "vision": [{"id": "glm-4.6v-flash", "label": "GLM-4.6V-Flash（免费）"}],
+                    "video": [],
+                }
+                t = msg.get("category", "")
+                await _send(ws, {"type": "model:list:ok", "id": mid, "category": t, "label": t,
+                                 "models": _MODELS.get(t, [])})
             # ── 未知 ──
             else:
                 await _send(ws, {"type": mtype + ":error", "id": mid, "code": "E_NOT_FOUND",

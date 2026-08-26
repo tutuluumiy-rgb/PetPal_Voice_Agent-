@@ -310,7 +310,7 @@ class DeepSeekLLM(OpenAICompatLLM):
     def __init__(self):
         super().__init__(
             api_key=os.getenv("DEEPSEEK_API_KEY"),
-            base_url="https://api.deepseek.com",
+            base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
             model=os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
             extra_body={"thinking": {"type": "disabled"}},  # DeepSeek 关闭思考模式
         )

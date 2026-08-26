@@ -88,9 +88,12 @@
 ### 3.3 `speech_start`（语义别称：`vad_speech_start`）
 前端 Silero VAD 判定「人声开始」。
 ```json
-{ "type": "speech_start", "preRollBase64": "<base64 PCM 或 null>" }
+{ "type": "speech_start", "preRollBase64": "<base64 PCM 或 null>", "isPlaying": true|false }
 ```
 - `preRollBase64`：开口前约 256ms 的 PCM（补 VAD 触发延迟丢的首字），可为 `null`。
+- `isPlaying`：前端此刻是否仍有球球语音在播。为 `true` 且后端处于 `listening` 时，说明
+  `client_playback_done` 兜底/竞态提前关了打断窗口而前端还在播 → 后端**立即掐断前端**
+  （发 `barge_confirm`，前端销毁播放器丢弃旧音频），再进入正常收话；为 `false` 走原收话流程。
 - 后端基于当前状态做打断/收音决策。
 - > wire type 为 `speech_start`（向后兼容测试看板）；语义上等价于 `vad_speech_start`。Electron 按 `speech_start` 发送即可。
 

@@ -56,16 +56,13 @@ READ_TOOL = {
     "type": "function",
     "function": {
         "name": "read",
-        "description": (
-            "Read a UTF-8 text file from the learning workspace. "
-            "Use offset and limit to inspect large files in parts."
-        ),
+        "description": "读取工作区内的 UTF-8 文本文件；大文件可用 offset/limit 分段读取。",
         "parameters": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Workspace-relative or absolute file path"},
-                "offset": {"type": "integer", "description": "1-indexed starting line"},
-                "limit": {"type": "integer", "description": "Maximum number of lines"},
+                "path": {"type": "string", "description": "工作区相对路径或绝对路径"},
+                "offset": {"type": "integer", "description": "起始行号（从 1 开始）"},
+                "limit": {"type": "integer", "description": "最大读取行数"},
             },
             "required": ["path"],
             "additionalProperties": False,

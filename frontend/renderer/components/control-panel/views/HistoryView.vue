@@ -5,9 +5,10 @@
  * 该会话的事件轨迹时间线（用户→西西→工具→结果，按时间顺序；runId 变化时按「轮」分段）。
  * 数据：history:list / history:search（分页）、history:detail（session 事件流）。
  */
-import { computed, onMounted, ref } from 'vue'
+import { computed, onActivated, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import PageCard from '../PageCard.vue'
 import type { HistoryDetail, HistoryEvent, HistoryItem } from '../../../../preload/types'
+import { setPanelActions, clearPanelActions } from '../../../app/panelActions'
 
 const PAGE_SIZE = 20
 
@@ -120,9 +121,61 @@ function toggleEvent(i: number): void {
   eventFold.value = { ...eventFold.value, [i]: !eventFold.value[i] }
 }
 
+// ── 删除会话（选择模式） ──
+// 点击「删除会话」→ 会话条出现圆点（可多选）→ 右下角「确认删除」（保存按钮位置）→ 删除并刷新
+const selectMode = ref(false)
+const selected = ref<string[]>([])
+
+function enterSelectMode(): void {
+  selectMode.value = true
+  selected.value = []
+  expanded.value = {}
+  registerActions()
+}
+function exitSelectMode(): void {
+  selectMode.value = false
+  selected.value = []
+  registerActions()
+}
+function togglePick(sessionId?: string): void {
+  if (!sessionId) return
+  const i = selected.value.indexOf(sessionId)
+  if (i >= 0) selected.value = selected.value.filter((id) => id !== sessionId)
+  else selected.value = [...selected.value, sessionId]
+}
+async function confirmDelete(): Promise<void> {
+  const ids = selected.value
+  if (!ids.length) return
+  for (const id of ids) {
+    try {
+      await window.api.historyDelete(id)
+    } catch {
+      /* 单条失败继续删其余 */
+    }
+  }
+  exitSelectMode()
+  expanded.value = {}
+  await doSearch(1)
+}
+
+function registerActions(): void {
+  if (selectMode.value) {
+    setPanelActions([
+      { key: 'cancel', label: '取消', onClick: () => exitSelectMode() },
+      { key: 'delete', label: '确认删除', primary: true, disabled: () => selected.value.length === 0, onClick: () => void confirmDelete() },
+    ])
+  } else {
+    clearPanelActions()
+  }
+}
+
+watch(selectMode, () => registerActions())
 onMounted(() => {
   void doSearch(1)
+  registerActions()
 })
+onActivated(registerActions)
+onBeforeUnmount(() => clearPanelActions())
 </script>
 
 <template>
@@ -144,6 +197,20 @@ onMounted(() => {
         >
           {{ searching ? '搜索中…' : '查询' }}
         </button>
+        <button
+          type="button"
+          class="h-8 shrink-0 rounded-md border px-3 text-[13px] font-medium transition-all duration-ds-sm ease-expo-out hover:shadow-ds-hover active:shadow-ds-active"
+          :class="selectMode
+            ? 'border-danger/40 text-danger hover:bg-danger/10'
+            : 'border-line-subtle bg-transparent text-fg-secondary hover:bg-surface-2 hover:text-fg-primary'"
+          @click="selectMode ? exitSelectMode() : enterSelectMode()"
+        >
+          {{ selectMode ? '取消选择' : '删除会话' }}
+        </button>
+      </div>
+
+      <div v-if="selectMode" class="mt-2 rounded-md border border-danger/30 bg-danger/10 px-3 py-1.5 text-[12px] text-danger">
+        已进入删除模式：点击会话旁的圆点选中，再点右下角「确认删除」
       </div>
 
       <div class="mt-3">
@@ -165,12 +232,18 @@ onMounted(() => {
             :key="row.sessionId"
             class="overflow-hidden rounded-md border border-line-subtle bg-surface-1/60"
           >
-            <!-- 抽屉标题（点击展开/收起） -->
+            <!-- 抽屉标题（点击展开/收起；删除模式下点击=选中） -->
             <button
               type="button"
               class="flex w-full items-center gap-3 px-3 py-2 text-left transition-colors duration-ds-sm ease-expo-out hover:bg-surface-2"
-              @click="toggleRun(row)"
+              @click="selectMode ? togglePick(row.sessionId) : toggleRun(row)"
             >
+              <span v-if="selectMode" class="flex h-4 w-4 shrink-0 items-center justify-center">
+                <span
+                  class="h-3.5 w-3.5 rounded-full border-2 transition-colors duration-ds-sm ease-expo-out"
+                  :class="selected.includes(row.sessionId ?? '') ? 'border-accent bg-accent' : 'border-fg-muted'"
+                />
+              </span>
               <span class="shrink-0 font-mono text-[11px] text-fg-muted">{{ fmtTime(row.time) }}</span>
               <span class="flex-1 truncate text-[13px] text-fg-secondary" :title="row.preview">{{ row.preview }}</span>
               <span v-if="row.runCount" class="shrink-0 rounded-sm bg-accent/15 px-1.5 py-0.5 font-mono text-[10px] text-accent">{{ row.runCount }} 轮</span>

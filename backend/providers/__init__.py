@@ -6,7 +6,7 @@
 
 配置（backend/.env）：
     ASR_PROVIDER=ali          # 当前实现：阿里云 qwen3-asr
-    TTS_PROVIDER=ali          # 当前实现：阿里云 qwen3-tts
+    TTS_PROVIDER=ali          # 当前实现：阿里云 qwen3-tts；minimax=MiniMax Speech 2.8
     LLM_PROVIDER=deepseek     # 当前实现：DeepSeek
 新增接口：在 providers/ 下写新实现类，注册到对应 get_*() 的映射即可。
 """
@@ -33,7 +33,11 @@ def get_tts():
         from .tts import AliyunTTS
 
         return AliyunTTS()
-    raise RuntimeError(f"未知 TTS_PROVIDER: {provider}（可用: ali）")
+    if provider == "minimax":
+        from .minimax_tts import MiniMaxTTS
+
+        return MiniMaxTTS()
+    raise RuntimeError(f"未知 TTS_PROVIDER: {provider}（可用: ali, minimax）")
 
 
 def get_llm():

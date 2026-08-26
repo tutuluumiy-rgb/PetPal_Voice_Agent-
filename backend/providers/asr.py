@@ -33,7 +33,9 @@ ASR_MODEL = os.getenv("ASR_MODEL", "qwen3-asr-flash-realtime")
 ASR_API_KEY = os.getenv("ASR_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
 
 SAMPLE_RATE = 16000
-WS_URL = f"wss://dashscope.aliyuncs.com/api-ws/v1/realtime?model={ASR_MODEL}"
+# Base URL 可在 .env 用 ASR_BASE_URL 覆盖（默认阿里云 DashScope 实时接口）
+ASR_BASE_URL = os.getenv("ASR_BASE_URL", "wss://dashscope.aliyuncs.com/api-ws/v1/realtime")
+WS_URL = f"{ASR_BASE_URL}?model={ASR_MODEL}"
 
 # 单次 finalize 等待完成的最长时间（秒）
 FINALIZE_TIMEOUT = 20

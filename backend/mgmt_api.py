@@ -242,6 +242,31 @@ def register_mgmt(app) -> None:
                 elif mtype == "voice:settings:set":
                     from voice_settings import save_voice_settings
                     await _send(ws, {"type": "voice:settings:set:ok", "id": mid, **save_voice_settings(msg)})
+                # ── 音色列表（按当前 TTS 模型实时拉取）──
+                elif mtype == "voice:voices":
+                    from voice_catalog import list_voices
+                    await _send(ws, {"type": "voice:voices:ok", "id": mid, **list_voices(msg.get("model"))})
+                # ── 模型配置（当前模型 + 所需 API 密钥）──
+                elif mtype == "model:get":
+                    from model_config import get_model_config
+                    await _send(ws, {"type": "model:get:ok", "id": mid, **get_model_config()})
+                elif mtype == "model:set":
+                    from model_config import save_model_config
+                    try:
+                        await _send(ws, {"type": "model:set:ok", "id": mid, **save_model_config(msg)})
+                    except Exception as e:
+                        print(f"[mgmt] model:set 异常: {e}")
+                        await _err(ws, mid, "E_MODEL_SAVE", f"保存模型配置失败: {e}")
+                elif mtype == "model:check":
+                    from model_config import check_model_config
+                    try:
+                        await _send(ws, {"type": "model:check:ok", "id": mid, **await check_model_config()})
+                    except Exception as e:
+                        print(f"[mgmt] model:check 异常: {e}")
+                        await _err(ws, mid, "E_MODEL_CHECK", f"检查模型配置失败: {e}")
+                elif mtype == "model:list":
+                    from model_config import list_available_models
+                    await _send(ws, {"type": "model:list:ok", "id": mid, **list_available_models(msg.get("category"))})
                 # ── 权限策略 ──
                 elif mtype == "auth:policy:get":
                     policy = _load_json(AUTH_POLICY_PATH, {"policy": DEFAULT_AUTH_POLICY}).get("policy", DEFAULT_AUTH_POLICY)
@@ -290,6 +315,20 @@ def register_mgmt(app) -> None:
                         await _send(ws, {"type": "history:detail:ok", "id": mid,
                                          "sessionId": sid, "title": title,
                                          "events": build_session_events(sess["_messages"])})
+                elif mtype == "history:delete":
+                    sid = msg.get("sessionId") or ""
+                    if not sid:
+                        await _err(ws, mid, "E_VALIDATION", "缺少 sessionId")
+                    else:
+                        path = os.path.join(SESSIONS_DIR, f"{sid}.jsonl")
+                        if os.path.exists(path):
+                            try:
+                                os.remove(path)
+                                await _send(ws, {"type": "history:delete:ok", "id": mid, "sessionId": sid})
+                            except OSError as e:
+                                await _err(ws, mid, "E_DELETE", f"删除会话失败: {e}")
+                        else:
+                            await _err(ws, mid, "E_NOT_FOUND", "session 不存在")
                 else:
                     await _err(ws, mid, "E_NOT_FOUND", f"未知消息类型: {mtype}")
         except WebSocketDisconnect:

@@ -6,7 +6,7 @@
   → 结果回填 → 继续。execute_tool 按模式白名单在做调用前校验。
 
 双模式 × 工具权限（语音宠物需求）：
-    闲聊模式（CHAT_MODE）：只开放 web_search / read / calculator（搜索、读取、计算）
+    闲聊模式（CHAT_MODE）：只开放 web_search / read / calculator / get_weather（搜索、读取、计算、查天气）
     工作模式（WORK_MODE）：全部工具开放（含 get_weather、bash、write、edit、ask_user_questions）
     白名单由调用方传入 mode 决定；越权调用直接拒绝，不执行。
 
@@ -28,8 +28,8 @@ from .memory import memory_add, memory_forget, MEMORY_ADD_TOOL, MEMORY_FORGET_TO
 CHAT_MODE = "chat"
 WORK_MODE = "work"
 
-# 闲聊模式工具白名单（搜索/读取/计算 + 主动记忆）
-CHAT_MODE_TOOLS = {"web_search", "read", "calculator"}
+# 闲聊模式工具白名单（搜索/读取/计算/天气 + 主动记忆）
+CHAT_MODE_TOOLS = {"web_search", "read", "calculator", "get_weather"}
 # 工作模式工具白名单（全开）
 WORK_MODE_TOOLS = None  # None = 全量
 
@@ -214,7 +214,8 @@ def build_catalog_md(mode: str | None = None) -> str:
     mode=None 时默认全量（向后兼容无参调用）。
     """
     names = get_tool_names(mode)
-    lines = ["## 可用工具", "以下是你可以调用的工具。需要时按【工具调用格式】输出调用声明。"]
+    lines = ["## 可用工具", "以下是你可以调用的工具：需要时直接用函数调用（function calling）发起即可，"
+             "无需输出任何文本声明，也无需把调用过程播报成台词；调用后根据返回结果自然继续回答。"]
     if mode is not None:
         lines.append(f"（当前模式 {('工作' if mode == WORK_MODE else '闲聊')}，仅以下工具可用）")
     for name in names:

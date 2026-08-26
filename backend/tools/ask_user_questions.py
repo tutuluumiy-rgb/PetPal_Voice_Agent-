@@ -57,18 +57,15 @@ ASK_USER_QUESTIONS_TOOL = {
     "function": {
         "name": "ask_user_questions",
         "description": (
-            "Ask the user one clarifying question and wait for the answer. "
-            "Use this in plan mode when important requirements are ambiguous; "
-            "do not use it for information the agent can safely infer. "
-            "In plan mode, make exactly one question per call and ask the next question "
-            "only after the user answers this one."
+            "向用户提出一个澄清问题并等待回答。仅当关键需求确实模糊、无法安全推断时才使用；"
+            "一次调用只问一个问题，等用户回答后再决定是否继续。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "questions": {
                     "type": "array",
-                    "description": "Exactly one question per call. Include concrete options when useful; the host also provides an Other option.",
+                    "description": "每次只传一个问题；可附带具体选项，宿主会额外提供\u201c其他\u201d选项。",
                     "minItems": 1,
                     "maxItems": 1,
                     "items": {

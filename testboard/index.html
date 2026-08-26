@@ -187,10 +187,17 @@
     font-size: 11px;
   }
   .stage-VAD { color: #89b4fa; }
+  .stage-前端VAD { color: #cba6f7; }  /* 紫色：与 log-vad-front 一致 */
+  .stage-后端VAD { color: #94e2d5; }  /* 青色：与 log-vad-back 一致 */
   .stage-ASR { color: #89dceb; }
   .stage-LLM { color: #a6e3a1; }
   .stage-TTS { color: #f9e2af; }
   .stage-Barge { color: #f38ba8; }
+  .stage-Bargein { color: #f38ba8; }  /* 兼容旧后端可能发 "Bargein" */
+  .stage-工具 { color: #fab387; }
+  .stage-模式 { color: #89dceb; }
+  .stage-系统 { color: #6c7086; }
+  .stage-interrupted { color: #f38ba8; }  /* 打断轮的 current 标签 */
 
   @keyframes eventIn {
     from { opacity: 0; transform: translateY(-4px); }
@@ -270,6 +277,8 @@
           </div>
           <span id="barge-avg-value" style="width:56px;text-align:right;color:#f38ba8;font-size:12px;font-weight:bold;">-</span>
         </div>
+        <!-- 本轮 current 数据（打断轮标记 + 各阶段 ms）-->
+        <div id="current-status" style="display:none;margin:6px 0;padding:6px 8px;background:#313244;border-radius:5px;font-size:11px;color:#a6adc8;line-height:1.4;"></div>
         <div id="avg-bars"></div>
       </div>
     </div>
@@ -704,6 +713,8 @@ function onMessage(event) {
         addEventRow(msg);
         break;
       case 'timing':
+        // 调试钩子：打 timing 原文到 console，便于排查 avg 累加问题
+        console.log('[timing]', JSON.stringify(msg))
         updateAvgPanel(msg);
         // 不再在这里设 ballIsPlaying = false！
         // 后端 timing 是「发送完」，但前端音频可能还在播放队列里。
@@ -737,9 +748,14 @@ function addEventRow(msg) {
   ts.textContent = '+' + msg.ts + 's';
   row.appendChild(ts);
 
-  // 阶段名
+  // 阶段名：保留中文原样（"前端VAD"/"后端VAD"/"工具"/"模式"/"系统"），按 class 名命中 CSS 配色
+  // 兼容：后端发 "Barge-in" → "Barge"（CSS 有 .stage-Barge + .stage-Bargein）
+  // 早期代码用 msg.stage.replace(/[^A-Za-z]/g,'') 把中文洗成空、把"Barge-in"洗成"Bargein"，
+  // 导致"Barge-in"颜色丢失、中文 stage 完全没样式。
   const stage = document.createElement('span');
-  stage.className = 'event-stage stage-' + msg.stage.replace(/[^A-Za-z]/g, '');
+  let stageKey = msg.stage;
+  if (stageKey === 'Barge-in') stageKey = 'Barge';
+  stage.className = 'event-stage stage-' + stageKey;
   stage.textContent = msg.stage;
   row.appendChild(stage);
 
@@ -764,14 +780,53 @@ function addEventRow(msg) {
 }
 
 // ── 底部平均指标面板 ────────────────────────────────
+// 「真实端到端」独立历史（用户说完→喇叭第一帧出声，单位 ms）
+// 与后端 avg 的区别：后端 e2e = asr + llm首句 + tts首包（服务端首响），
+// 而真实端到端还包含网络/前端缓冲/音频解码，**用户实际感知**的延迟。
+const realE2EHistory = [];
+const REAL_E2E_MAX = 50;
+function recordRealE2E(ms) {
+  if (typeof ms !== 'number' || !isFinite(ms) || ms < 0) return;
+  realE2EHistory.push(ms);
+  if (realE2EHistory.length > REAL_E2E_MAX) realE2EHistory.shift();
+}
+function avgRealE2E() {
+  if (realE2EHistory.length === 0) return null;
+  return realE2EHistory.reduce((a, b) => a + b, 0) / realE2EHistory.length;
+}
+
 function updateAvgPanel(msg) {
+  // 后端发的 count 是 timing_count（含打断轮）；avg 分母已由后端排除打断轮
   const count = msg.count || 0;
   document.getElementById('avg-count').textContent = count;
 
   const avg = msg.avg || {};
+  // current 是本轮原始数据，用于调试当前轮；interrupted=true 表示该轮被打断
+  const current = msg.current || {};
+
+  // 备注：本轮状态（打断提示）
+  // 注意：打断轮的 current 里 tts_first_packet=0、llm_first_sentence 可能偏小，
+  // 不能计入 avg（后端已剔除），这里只展示给开发者看
+  if (current.interrupted) {
+    const curEl = document.getElementById('current-status');
+    if (curEl) {
+      const curStr = `打断轮数据（不进avg）: ASR=${(current.asr*1000||0).toFixed(0)}ms LLM首句=${(current.llm_first_sentence*1000||0).toFixed(0)}ms TTS首包=${(current.tts_first_packet*1000||0).toFixed(0)}ms E2E=${(current.e2e*1000||0).toFixed(0)}ms`;
+      curEl.textContent = curStr;
+      curEl.style.display = 'block';
+    }
+  } else if (current.e2e !== undefined) {
+    // 完整轮：current 也展示一行
+    const curEl = document.getElementById('current-status');
+    if (curEl) {
+      const curStr = `本轮: ASR=${(current.asr*1000||0).toFixed(0)}ms LLM首句=${(current.llm_first_sentence*1000||0).toFixed(0)}ms TTS首包=${(current.tts_first_packet*1000||0).toFixed(0)}ms E2E=${(current.e2e*1000||0).toFixed(0)}ms Total=${(current.total*1000||0).toFixed(0)}ms`;
+      curEl.textContent = curStr;
+      curEl.style.display = 'block';
+    }
+  }
+
   const max = 5; // 条形图刻度上限（秒）
   const items = [
-    { key: 'e2e', label: '端到端', color: '#f38ba8', bold: true },
+    { key: 'e2e', label: '服务端E2E', color: '#f38ba8', bold: true },
     { key: 'asr', label: 'ASR', color: '#89b4fa' },
     { key: 'llm_first_token', label: 'LLM首字', color: '#a6e3a1' },
     { key: 'llm_first_sentence', label: 'LLM首句', color: '#a6e3a1' },
@@ -809,6 +864,34 @@ function updateAvgPanel(msg) {
     if (it.bold) value.style.color = '#f38ba8';
     row.appendChild(value);
 
+    container.appendChild(row);
+  }
+
+  // 真实端到端（用户说完→第一帧出声）—— 前端独立测量，不走后端
+  const realE2E = avgRealE2E();
+  if (realE2E !== null) {
+    const row = document.createElement('div');
+    row.className = 'bar-row';
+    const label = document.createElement('span');
+    label.className = 'bar-label';
+    label.textContent = '真实E2E';
+    label.style.fontWeight = 'bold';
+    label.style.color = '#f9e2af';
+    row.appendChild(label);
+    const track = document.createElement('div');
+    track.className = 'bar-track';
+    const fill = document.createElement('div');
+    fill.className = 'bar-fill';
+    fill.style.width = Math.min(100, (realE2E / max) * 100) + '%';
+    fill.style.background = '#f9e2af';
+    track.appendChild(fill);
+    row.appendChild(track);
+    const value = document.createElement('span');
+    value.className = 'bar-value';
+    value.textContent = realE2E.toFixed(0) + 'ms';
+    value.style.fontWeight = 'bold';
+    value.style.color = '#f9e2af';
+    row.appendChild(value);
     container.appendChild(row);
   }
 }
@@ -956,6 +1039,8 @@ function feedPcm(pcm) {
       const e2eRealMs = playFirstFrameTs - userSpeechFinishTs;
       console.log(`[真实端到端] 用户说完→第一帧出声 = ${e2eRealMs.toFixed(0)}ms`);
       log(`🎯 真实端到端 ${e2eRealMs.toFixed(0)}ms`, 'log-sys');
+      // 喂给 avg 面板：这是用户真正感知的「端到端」（不是服务端首响 e2e）
+      recordRealE2E(e2eRealMs);
       // 清空，避免下一轮误用
       userSpeechFinishTs = null;
       playFirstFrameTs = null;
@@ -1093,6 +1178,8 @@ async function initFrontendVad() {
           ws.send(JSON.stringify({
             type: 'speech_start',
             preRollBase64: preRoll ? arrayBufferToBase64(preRoll.buffer) : null,
+            // 前端此刻是否仍有音频在播：后端 listening 时若为 true → 立即掐断（见 main.py）
+            isPlaying: !!(pcmPlayback && pcmPlayback.activeSources && pcmPlayback.activeSources.length > 0),
           }));
         }
       },

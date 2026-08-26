@@ -49,7 +49,6 @@ function enforceLockedSize(win: BrowserWindow, targetW: number, targetH: number,
     win.setResizable(true)
     win.setSize(targetW, targetH)
     win.setResizable(false)
-    console.log(`[${tag}:force-resize] ${w}x${h} -> ${targetW}x${targetH}`)
   } catch (e) {
     console.log(`[${tag}:force-resize] failed`, e)
   } finally {
@@ -106,16 +105,10 @@ export function createPetWindow(): BrowserWindow {
   petWindow.setMinimumSize(PET_WINDOW_SIZE.width, PET_WINDOW_SIZE.height)
   petWindow.setMaximumSize(PET_WINDOW_SIZE.width, PET_WINDOW_SIZE.height)
 
-  // 诊断 + 强制扳回：监听宠物窗口 resize，一旦系统把尺寸改大就立刻 setSize 扳回锁定位
+  // 强制扳回尺寸：一旦系统把尺寸改大就立刻 setSize 扳回锁定位（防累积放大）
   petWindow.on('resize', () => {
     if (_forceResizing) return
-    const b = petWindow!.getBounds()
-    console.log(`[pet:resize] bounds=(${b.x},${b.y} ${b.width}x${b.height})`)
     enforceLockedSize(petWindow!, PET_WINDOW_SIZE.width, PET_WINDOW_SIZE.height, 'pet')
-  })
-  petWindow.on('move', () => {
-    const b = petWindow!.getBounds()
-    console.log(`[pet:move] bounds=(${b.x},${b.y} ${b.width}x${b.height})`)
   })
   // 修正初始尺寸：transparent 窗口启动即可能漂移到 491×620，创建后立即扳回 220×240
   enforceLockedSize(petWindow, PET_WINDOW_SIZE.width, PET_WINDOW_SIZE.height, 'pet-init')
@@ -188,16 +181,10 @@ export function createChatWindow(): BrowserWindow {
   chatWindow.setMinimumSize(CHAT_PANEL_SIZE.width, CHAT_PANEL_SIZE.height)
   chatWindow.setMaximumSize(CHAT_PANEL_SIZE.width, CHAT_PANEL_SIZE.height)
 
-  // 诊断 + 强制扳回：监听对话面板窗口 resize，一旦系统改大就 setSize 扳回锁定位
+  // 强制扳回尺寸：一旦系统改大就 setSize 扳回锁定位
   chatWindow.on('resize', () => {
     if (_forceResizing) return
-    const b = chatWindow!.getBounds()
-    console.log(`[chat:resize] bounds=(${b.x},${b.y} ${b.width}x${b.height})`)
     enforceLockedSize(chatWindow!, CHAT_PANEL_SIZE.width, CHAT_PANEL_SIZE.height, 'chat')
-  })
-  chatWindow.on('move', () => {
-    const b = chatWindow!.getBounds()
-    console.log(`[chat:move] bounds=(${b.x},${b.y} ${b.width}x${b.height})`)
   })
   // 修正初始尺寸
   enforceLockedSize(chatWindow, CHAT_PANEL_SIZE.width, CHAT_PANEL_SIZE.height, 'chat-init')
@@ -259,7 +246,6 @@ export function positionChatWindow(): void {
   const ct = Math.max(wa.y, Math.min(Math.round(top), wa.y + wa.height - ch))
 
   win.setPosition(cl, ct)
-  logSizes('position')
 }
 
 /** 宠物拖拽时若对话面板开着，跟随重定位 */
@@ -274,50 +260,21 @@ export function requestCloseChatPanel(): void {
   closeChatPanel()
 }
 
-// ---------- 诊断：打印各窗口真实物理尺寸（排查"拖拽/右键后窗口放大"） ----------
-/** 打印当前窗口尺寸，用于 devtools 确认窗口物理尺寸是否在异常变化 */
-function logSizes(tag: string): void {
-  const parts: string[] = []
-  const pet = getPetWindow()
-  if (pet) {
-    const [w, h] = pet.getSize()
-    const [cw, ch] = pet.getContentSize()
-    const [px, py] = pet.getPosition()
-    const dpr = pet.webContents.getZoomFactor()
-    const disp = screen.getDisplayMatching(pet.getBounds())
-    parts.push(`pet(pos=${px},${py} w=${w}h=${h} content=${cw}x${ch} dpr=${dpr} dispScale=${disp.scaleFactor})`)
-  }
-  if (chatWindow && !chatWindow.isDestroyed()) {
-    const vis = chatWindow.isVisible()
-    const [w, h] = chatWindow.getSize()
-    const [cw, ch] = chatWindow.getContentSize()
-    const [px, py] = chatWindow.getPosition()
-    const disp = screen.getDisplayMatching(chatWindow.getBounds())
-    parts.push(`chat(vis=${vis} pos=${px},${py} w=${w}h=${h} content=${cw}x${ch} dispScale=${disp.scaleFactor})`)
-  }
-  console.log(`[win:${tag}] ${parts.join(' ')}`)
-}
-
 export function openChatPanel(): void {
   const win = createChatWindow()
-  logSizes('open-pre')
   if (win.isVisible()) {
     positionChatWindow()
     win.focus()
-    logSizes('open-already-visible')
     return
   }
   win.showInactive()
   positionChatWindow()
-  logSizes('open-shown')
 }
 
 /** 关闭对话面板：隐藏（不销毁，便于快速重开）；宠物窗口不受影响 */
 export function closeChatPanel(): void {
   if (chatWindow && !chatWindow.isDestroyed()) {
-    logSizes('close-pre')
     chatWindow.hide()
-    logSizes('close-after')
   }
 }
 

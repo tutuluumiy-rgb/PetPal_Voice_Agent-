@@ -101,9 +101,18 @@ export const IPC_CH = {
   // 语音参数（invoke）
   voiceSettingsGet: 'voice:settings:get',
   voiceSettingsSet: 'voice:settings:set',
+  // 音色列表（按当前 TTS 模型实时拉取，invoke）
+  voiceVoices: 'voice:voices',
+  // 模型配置（当前模型 + 所需 API 密钥）：查询 / 保存 / 检查 / 获取可用模型（invoke）
+  modelGet: 'model:get',
+  modelSet: 'model:set',
+  modelCheck: 'model:check',
+  modelList: 'model:list',
 
   // 历史审详情（run 事件轨迹）：渲染进程 → 主进程（invoke）
   historyDetail: 'history:detail',
+  // 删除会话（invoke）
+  historyDelete: 'history:delete',
 
   // 皮肤主题：渲染进程 → 主进程（invoke / send）
   skinGet: 'skin:get',
@@ -189,11 +198,97 @@ export interface VoiceStatePayload {
   state: VoiceUiState
 }
 
-/** 语音参数（volume/pitch 0-100；voice 枚举） */
+/** 语音参数（volume/pitch 0-100；voice 为音色 id，见 VoiceInfo） */
 export interface VoiceSettings {
   volume: number
   pitch: number
-  voice: 'default' | 'cute' | 'calm' | 'bright'
+  voice: string
+}
+
+/** 音色项（voice:voices 返回） */
+export interface VoiceInfo {
+  id: string
+  label: string
+}
+
+/** 音色列表响应（按当前 TTS 模型实时拉取） */
+export interface VoiceListResp {
+  model?: string
+  current: string
+  voices: VoiceInfo[]
+}
+
+/** 模型配置组（llm/asr/tts/vision/video 各一组；api_key_masked 掩码显示，绝不回传明文） */
+export interface ModelSection {
+  type: string
+  label: string
+  hint?: string
+  sub?: string
+  url: string
+  model: string
+  voice?: string
+  api_key_set: boolean
+  api_key_env: string
+  api_key_masked?: string
+}
+
+/** 模型配置（model:get / model:set 返回，5 组） */
+export interface ModelConfig {
+  llm: ModelSection
+  asr: ModelSection
+  tts: ModelSection
+  vision: ModelSection
+  video: ModelSection
+}
+
+/** 单组保存字段（只提交用户改动的） */
+export interface ModelSectionSave {
+  url?: string
+  api_key?: string
+  model?: string
+  voice?: string
+}
+
+/** 模型保存 payload */
+export interface ModelSavePayload {
+  sections?: Record<string, ModelSectionSave>
+}
+
+/** 模型检查：单条密钥就绪状态 */
+export interface ModelCheckItem {
+  key: string
+  label: string
+  status: 'ok' | 'missing'
+  detail: string
+  model?: string
+}
+
+/** 模型检查：best-effort LLM 连通性 */
+export interface ModelCheckLive {
+  status: 'ok' | 'fail' | 'skipped'
+  detail: string
+  latency_ms?: number
+}
+
+/** 模型检查结果（model:check 返回） */
+export interface ModelCheckResult {
+  ok: boolean
+  checks: ModelCheckItem[]
+  live: ModelCheckLive
+  required: string[]
+}
+
+/** 可用模型项（model:list 返回） */
+export interface ModelListItem {
+  id: string
+  label: string
+}
+
+/** 可用模型列表（model:list 返回） */
+export interface ModelListResp {
+  category: string
+  label: string
+  models: ModelListItem[]
 }
 
 /** 流式对话运行态（chat:running payload） */
@@ -319,6 +414,8 @@ export interface AppApi {
   historySearch(keyword: string, page: number, pageSize: number): Promise<HistoryPage>
   /** 查询单个 session 的事件轨迹（抽屉展开；按 runId 分组） */
   historyDetail(sessionId: string): Promise<HistoryDetail>
+  /** 删除一个历史会话 */
+  historyDelete(sessionId: string): Promise<void>
 
   /** 读取人设 markdown */
   personalityGet(): Promise<{ content: string }>
@@ -333,6 +430,18 @@ export interface AppApi {
   voiceSettingsGet(): Promise<VoiceSettings>
   /** 保存语音参数 */
   voiceSettingsSet(settings: VoiceSettings): Promise<VoiceSettings>
+
+  /** 拉取当前 TTS 模型可用音色列表（实时） */
+  voiceVoices(): Promise<VoiceListResp>
+
+  /** 读取当前模型配置（当前模型 + 所需 API 密钥状态） */
+  modelGet(): Promise<ModelConfig>
+  /** 保存模型配置（写回后端 .env） */
+  modelSet(payload: ModelSavePayload): Promise<ModelConfig>
+  /** 检查模型配置（各必需密钥就绪 + best-effort 连通性） */
+  modelCheck(): Promise<ModelCheckResult>
+  /** 获取某组（llm/asr/tts/vision/video）的可用模型 */
+  modelList(type: string): Promise<ModelListResp>
 
   /** 读取皮肤主题 */
   getSkin(): Promise<Skin>
