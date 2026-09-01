@@ -97,6 +97,7 @@ EDIT_TOOL = {
                 "edits": {
                     "type": "array",
                     "minItems": 1,
+                    "description": "要执行的一组精确文本替换；每个元素用 old_text（现有原文）+ new_text（新文本）描述一处替换，old_text 必须在文件中唯一匹配",
                     "items": {
                         "type": "object",
                         "properties": {

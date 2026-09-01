@@ -193,7 +193,8 @@ def _extract_objective(ws_mock: MockWs, t0: float, session, expected_tool: str |
       - asr_ms                模拟 ASR（SIM_ASR_MS；真实链路由 last_asr_time 覆盖）
       - llm_first_sentence_ms LLM 出第一句
       - tts_first_packet_ms   TTS 首包
-      - total_ms              完整回合
+      - total_ms              完整回合（服务端整轮耗时：t0 → 处理完成；后端已废弃 timing.total，
+                               旧口径 asr+t_llm+t_tts 重复计 TTS，不再提供）
       - reply_length          回复字数（chars，非 tokens）
       - tool_call_success     工具调用是否成功（按期望工具精确比对）
 
@@ -228,7 +229,14 @@ def _extract_objective(ws_mock: MockWs, t0: float, session, expected_tool: str |
                 objective["e2e_latency_ms"] = round(c.get("e2e", 0) * 1000, 1)
                 objective["llm_first_sentence_ms"] = round(c.get("llm_first_sentence", 0) * 1000, 1)
                 objective["tts_first_packet_ms"] = round(c.get("tts_first_packet", 0) * 1000, 1)
-            objective["total_ms"] = round(c.get("total", 0) * 1000, 1)
+            # 完整回合：后端自改造清单 §7 起废弃 timing.total（旧的 asr+t_llm+t_tts 会重复计 TTS）。
+            # 用事件流服务端整轮耗时近似：t0（run 起点）→ 最后一条收到/发出的消息（绝对时间戳）
+            # 注意：emit_event 的 data["ts"] 是「相对本轮开始」的时间，不能与 t0 直接相减；
+            # 用 MockWs.messages 元组的绝对时间（send_json 记录 time.time()）计算。
+            if ws_mock.messages:
+                objective["total_ms"] = round(max(0.0, ws_mock.messages[-1][0] - t0) * 1000, 1)
+            else:
+                objective["total_ms"] = None
             # 若真实 ASR 有值（真实链路），用它覆盖模拟值
             real_asr = c.get("asr", 0)
             if real_asr and real_asr > 0:
@@ -304,6 +312,20 @@ async def run_text_case(text: str, session_id: str = "eval", overrides: dict | N
     # D4 期望工具（评测中心 case 上配置的 expected_tool；用于 tool_call_success 精确比对）
     expected_tool = str(overrides.get("expected_tool") or "") or None
 
+    # v6: 模型覆盖（评测中心 Step4 选择 → 跑分时临时切换 LLM 模型，实验对比用）
+    # backend 的 llm 是全局单例（providers.get_llm()，模型名来自 .env）；
+    # 这里临时改 llm.model，跑完恢复，避免影响后端正常会话。
+    model_override = overrides.get("model") or {}
+    llm_model = str(model_override.get("llm") or "").strip() or None
+    llm_orig_model = None
+    try:
+        llm_orig_model = getattr(_main.llm, "model", None)
+        if llm_model and llm_orig_model:
+            _main.llm.model = llm_model
+            print(f"[telemetry] overrides: llm.model {llm_orig_model} → {llm_model}", file=sys.stderr)
+    except Exception as _e:
+        print(f"[telemetry] model override skipped: {_e}", file=sys.stderr)
+
     _main.emotion_state.current = "平静"
     t0 = time.time()
     try:
@@ -318,6 +340,13 @@ async def run_text_case(text: str, session_id: str = "eval", overrides: dict | N
         return {"ok": False, "events": _extract_events(ws), "objective": {}, "error": "cancelled"}
     except Exception as e:
         return {"ok": False, "events": _extract_events(ws), "objective": _extract_objective(ws, t0, session, expected_tool), "error": f"{type(e).__name__}: {e}"}
+    finally:
+        # 恢复全局 llm.model，避免影响后端其他会话
+        if llm_model and llm_orig_model is not None:
+            try:
+                _main.llm.model = llm_orig_model
+            except Exception:
+                pass
 
     return {
         "ok": True,
