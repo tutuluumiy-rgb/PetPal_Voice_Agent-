@@ -47,3 +47,21 @@ tmp/
 
 # DSH 运行时目录
 .dsh/
+
+# ── 调试音频样本（含语音标定样本，隐私+体积，绝不提交）──
+backend/probe_*.mp3
+backend/*.mp3
+
+# ── 一次性诊断脚本/输出（根目录临时产物，不入库）──
+check_schemas.py
+export_audio.py
+inspect_long_schema.py
+inspect_schema.py
+inspect_out.txt
+long_schema_out.txt
+
+# ── 测试运行输出 ──
+backend/tests/_full_link_out.txt
+
+# ── 独立评测中心项目（自带 node_modules，单独仓库管理）──
+eval-center/

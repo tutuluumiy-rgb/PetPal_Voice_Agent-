@@ -17,17 +17,30 @@
  * 准备（跑一次，需联网）：
  *   cd frontend && python scripts/download_kws.py   # 下模型到 resources/kws/
  */
-import { BrowserWindow, ipcMain } from 'electron'
+import { BrowserWindow, app, ipcMain } from 'electron'
 import fs from 'node:fs'
 import path from 'node:path'
 import { IPC_CH } from '../preload/types'
 
-/** 模型目录：优先 <cwd>/resources/kws，退回 renderer/public/kws */
+/**
+ * 模型目录（修复：不再依赖 process.cwd()）：
+ * 按可靠性降序探测——app.getAppPath()（dev/构建/打包都指向应用根目录）、
+ * __dirname（out/main → 应用根）、最后才退回 cwd（老逻辑，仅兼容手工启动）。
+ * 兼容目录：<root>/resources/kws（现役）与 <root>/renderer/public/kws（历史落点）。
+ */
 function modelDir(): string {
-  const candidates = [
-    path.join(process.cwd(), 'resources', 'kws'),
-    path.join(process.cwd(), 'renderer', 'public', 'kws'),
+  const roots = [
+    app.getAppPath(),
+    path.resolve(__dirname, '..', '..'), // out/main → 应用根
+    process.cwd(), // 兜底：以 cwd 为根的旧行为
   ]
+  const candidates: string[] = []
+  for (const root of roots) {
+    for (const sub of ['resources/kws', 'renderer/public/kws']) {
+      const p = path.join(root, sub)
+      if (!candidates.includes(p)) candidates.push(p)
+    }
+  }
   for (const c of candidates) {
     if (fs.existsSync(path.join(c, 'encoder.onnx'))) return c
   }
@@ -50,7 +63,10 @@ export function initKws(): void {
   const dir = modelDir()
   const encoder = path.join(dir, 'encoder.onnx')
   if (!fs.existsSync(encoder)) {
-    console.warn('[kws] model not found, skip wake-word. Run: python scripts/download_kws.py (need encoder.onnx)')
+    console.warn(
+      `[kws] model not found, skip wake-word. Run: python scripts/download_kws.py (need encoder.onnx). ` +
+      `cwd=${process.cwd()} appPath=${app.getAppPath()} tryDir=${dir}`,
+    )
     return
   }
   // 2) require 原生绑定
@@ -134,11 +150,21 @@ export function registerKwsIpc(): void {
   ipcMain.on(IPC_CH.kwsFeed, (_event, payload: unknown): void => {
     if (!kws?.ready) return
     let data: Float32Array
-    if (payload instanceof Float32Array) {
-      data = payload
-    } else if (ArrayBuffer.isView(payload)) {
-      data = new Float32Array((payload as ArrayBufferView).buffer)
-    } else {
+    try {
+      if (payload instanceof Float32Array) {
+        data = payload
+      } else if (ArrayBuffer.isView(payload)) {
+        // F5 审计修复：从 view 的起始位置重建（避免字节不对齐触发 RangeError 崩溃面）
+        const view = payload as ArrayBufferView
+        data = new Float32Array(view.buffer, view.byteOffset, view.byteLength / 4)
+      } else {
+        return
+      }
+      // F5 审计修复：帧长度白名单（真实帧 1024 浮点；异常帧直接忽略，防主进程过载）
+      if (data.length < 1 || data.length > 8192 || data.byteLength % 4 !== 0) {
+        return
+      }
+    } catch {
       return
     }
     feedPcm(data)

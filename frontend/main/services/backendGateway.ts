@@ -17,9 +17,9 @@ import { getAuthPolicy, getMode, setMode, setAuthPolicy } from '../state'
 import { GatewayClient } from './gateway'
 import type { ChatStreamEvents } from './gateway'
 
-/** 管理端点：默认真实后端 /ws/mgmt（8001）；连不上自动回退 Mock 9000（环境变量可覆盖主地址） */
+/** 管理端点：默认真实后端 /ws/mgmt（8001）；连不上自动回退 Mock 9100（环境变量可覆盖主地址） */
 const BACKEND_WS_URL = process.env['PETPAL_MGMT_WS_URL'] ?? 'ws://127.0.0.1:8001/ws/mgmt'
-const MOCK_WS_URL = 'ws://127.0.0.1:9000/ws'
+const MOCK_WS_URL = process.env['PETPAL_MOCK_WS_URL'] ?? 'ws://127.0.0.1:9100/ws'
 
 function broadcast(channel: string, payload?: unknown): void {
   for (const win of BrowserWindow.getAllWindows()) {

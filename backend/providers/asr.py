@@ -53,7 +53,7 @@ class AliyunASR(ASRProvider):
     def start_streaming(self, session_id: str, on_partial):
         """开始新一轮流式识别：建 WS 连接 + 后台线程发送队列"""
         sess = {
-            "queue": queue.Queue(),      # ("audio", pcm) / ("commit", None) / ("close", None)
+            "queue": queue.Queue(maxsize=4096),  # F5 审计修复：有界队列防 DoS 堆积
             "on_partial": on_partial,
             "done": threading.Event(),
             "final_text": {},
@@ -67,7 +67,10 @@ class AliyunASR(ASRProvider):
         """喂入音频（实时入队，后台线程发送给云端）"""
         sess = self._sessions.get(session_id)
         if sess:
-            sess["queue"].put(("audio", pcm))
+            try:
+                sess["queue"].put(("audio", pcm), timeout=0.05)
+            except queue.Full:
+                pass  # F5 审计修复：队列满时丢弃该帧（本地实时链路不应堆积）
 
     async def finalize(self, session_id: str) -> str:
         """用户说完：commit 提交识别，返回最终文本（等待 completed）"""

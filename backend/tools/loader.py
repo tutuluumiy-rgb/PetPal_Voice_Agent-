@@ -283,7 +283,9 @@ def _tool_result_to_str(result) -> str:
 async def execute_tool(name: str, args: dict, mode: str | None = None) -> str:
     """执行工具，返回给 LLM 的文本结果。
 
-    调用前做模式白名单校验（越权直接拒绝，不执行）。
+    调用前做模式白名单校验（越权直接拒绝，不执行）+ 审批决策：
+    - 审批策略（F3 审计修复）：声明 REQUIRE_APPROVAL 的工具在 enforce_approval 开启时
+      走 ApprovalPolicy.authorize（其余默认放行——语音场景全自动）。
     mode=None 表示全量放开；传入模式则按该模式白名单过滤。
     """
     defn = TOOL_DEFINITIONS.get(name)
@@ -295,6 +297,13 @@ async def execute_tool(name: str, args: dict, mode: str | None = None) -> str:
             "（权限未开放），请不要调用它。"
         )
     try:
+        # F3 审计修复：补全审批接线（此前执行端从不调用 authorize）
+        approval_required = defn.get("approval") == "require_approval"
+        if approval_required:
+            from approval_policy import ApprovalPolicy
+            decision = ApprovalPolicy().authorize(name, args)
+            if not decision.allowed:
+                return f"错误：工具 {name} 未获授权（{decision.reason}）"
         result = defn["executor"](**args)
         if hasattr(result, "__await__"):
             result = await result

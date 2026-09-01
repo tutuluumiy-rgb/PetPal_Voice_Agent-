@@ -11,6 +11,9 @@
  * 基于测试看板（testboard）验证过的采集 + Silero VAD 逻辑迁移；renderer 直连音频 WS。
  * 依赖 renderer/assets/vad/ 的 UMD 库（onnxruntime-web + @ricky0123/vad-web）。
  */
+// 预卷纯函数（改造清单#1）：锚点 = VAD 判定窗口起点（非判定完成时刻），回退 = 爬坡期+余量
+import { computePreRollWindowMs, PRE_ROLL_MS as PRE_ROLL_DEFAULT_MS } from './preRoll'
+
 declare global {
   interface Window {
     vad?: any
@@ -73,7 +76,15 @@ export class VoicePipeline {
   // 打断后后端只能靠"含球球回声的 speaking_audio_cache"补首字 → 前半句丢字/错位。
   private readonly PRE_ROLL_BUFFER_SECONDS = 2   // 环形缓存总长（秒）
   private readonly PRE_ROLL_MS = 256              // 回退量（毫秒），从VAD触发点往前取这么多
-  private preRollBuffer: { data: Uint8Array }[] = []  // 存 PCM 块
+  /** 端点判定喂给 smart-turn 的"该说话段"长度上限（改造清单#7）。
+   *  与上游 pipecat max_duration_secs=8 对齐：喂【整段话】而非"最近 N ms"——
+   *  实测标注数据（scripts/smart_turn_probe.py，20 条）整段话判别 90% vs 尾部 1.6s 仅 80%，
+   *  且尾部切片会把"未完"误判成"说完"（韵律上下文被截断）。 */
+  private readonly SMART_TURN_MAX_MS = 8000
+  private preRollBuffer: { data: Uint8Array; ts: number }[] = []  // 存 PCM 块（含到达时刻 ts）
+  /** speech 窗口内的整段话缓冲（onSpeechStart 起累计，≥SMART_TURN_MAX_MS 保尾截断） */
+  private utteranceAudio: Uint8Array[] = []
+  private speechActive = false
 
   private readonly wsUrl: string
   private readonly vadBase: string
@@ -108,8 +119,8 @@ export class VoicePipeline {
   constructor(opts: VoicePipelineOptions) {
     this.wsUrl = opts.wsUrl
     this.vadBase = opts.vadAssetsBase ?? '/vad/'
-    this.posTh = opts.positiveThreshold ?? 0.4
-    this.negTh = opts.negativeThreshold ?? 0.35
+    this.posTh = opts.positiveThreshold ?? 0.6
+    this.negTh = opts.negativeThreshold ?? 0.4
   }
 
   /**
@@ -273,6 +284,8 @@ export class VoicePipeline {
     this.userSpeechFinishTs = null
     this.playFirstFrameTs = null
     this.preRollBuffer = []
+    this.utteranceAudio = []
+    this.speechActive = false
     this.stopStreamPlayback()
     this._closeWs()
     try {
@@ -301,12 +314,42 @@ export class VoicePipeline {
     for (let i = 0; i < input.length; i++) pcm[i] = Math.max(-1, Math.min(1, input[i])) * 32767
     // 写入环形缓存（持续保留最近 PRE_ROLL_BUFFER_SECONDS 秒，打断时切预卷补首字）
     this._writePreRoll(new Uint8Array(pcm.buffer))
+    // speech 窗口内累计"整段话"（供 speech_end 喂 smart-turn 端点判定）
+    if (this.speechActive) this._writeUtterance(new Uint8Array(pcm.buffer))
     this.ws.send(pcm.buffer) // 音频持续发送，不丢字
   }
 
-  /** 写入环形缓存：保留最近 PRE_ROLL_BUFFER_SECONDS 秒 PCM，超出则丢弃最旧块 */
+  /** 写入话段缓冲：累计整段话，超出 SMART_TURN_MAX_MS 则丢弃最旧（保尾 ≤8s，
+   *  与上游 max_duration_secs=8 / judge 内 8s 尾锚一致） */
+  private _writeUtterance(bytes: Uint8Array): void {
+    this.utteranceAudio.push(bytes)
+    let total = 0
+    for (const b of this.utteranceAudio) total += b.length
+    const capBytes = (this.SMART_TURN_MAX_MS / 1000) * 16000 * 2
+    while (total > capBytes && this.utteranceAudio.length > 0) {
+      total -= this.utteranceAudio.shift()!.length
+    }
+  }
+
+  /** 拼接整段话缓冲；为空返回 null */
+  private _concatUtterance(): Uint8Array | null {
+    if (this.utteranceAudio.length === 0) return null
+    let total = 0
+    for (const b of this.utteranceAudio) total += b.length
+    const merged = new Uint8Array(total)
+    let off = 0
+    for (const c of this.utteranceAudio) {
+      merged.set(c, off)
+      off += c.length
+    }
+    return merged
+  }
+
+  /** 写入环形缓存：保留最近 PRE_ROLL_BUFFER_SECONDS 秒 PCM，超出则丢弃最旧块
+   *  每块记录到达时刻 ts（供预卷按【VAD 判定窗口起点】时间窗切取，改造清单#1） */
   private _writePreRoll(bytes: Uint8Array): void {
-    this.preRollBuffer.push({ data: bytes })
+    const ts = performance.now()
+    this.preRollBuffer.push({ data: bytes, ts })
     // 累计总字节，超出 2 秒（16k*2*2=64000B）截掉最旧
     let total = 0
     for (const b of this.preRollBuffer) total += b.data.length
@@ -315,17 +358,57 @@ export class VoicePipeline {
     }
   }
 
-  /** 从环形缓存切出「回退 PRE_ROLL_MS 毫秒」的预卷（用户开口前那段，防 VAD 触发延迟丢首字） */
-  private _slicePreRoll(): Uint8Array | null {
+  /** 从环形缓存切出预卷（改造清单#1）：
+   *  锚点 = VAD 判定窗口起点（triggerTs 为 onSpeechStart 触发时刻），
+   *  回退 = 爬坡期+余量（PRE_SPEECH_PAD_MS），总长 PRE_ROLL_MS；
+   *  覆盖"[窗口起点 − pad, 窗口起点 − pad + 256ms]"≈ 开口最开头 + 开口初期。
+   *  兜底：按时间窗没切到任何块时，回退取尾部 256ms（旧行为）。 */
+  private _slicePreRoll(anchorTs: number | null = null): Uint8Array | null {
     if (this.preRollBuffer.length === 0) return null
-    const targetBytes = Math.round(this.PRE_ROLL_MS / 1000 * 16000 * 2)  // 256ms = 8192 字节
+    const refTs = anchorTs ?? this.preRollBuffer[this.preRollBuffer.length - 1].ts ?? performance.now()
+    const { startMs, endMs } = computePreRollWindowMs(refTs)
     const chunks: Uint8Array[] = []
     let collected = 0
-    for (let i = this.preRollBuffer.length - 1; i >= 0; i--) {
-      chunks.unshift(this.preRollBuffer[i].data)
-      collected += this.preRollBuffer[i].data.length
-      if (collected >= targetBytes) break
+    for (const b of this.preRollBuffer) {
+      if (b.ts == null) continue
+      if (b.ts >= startMs && b.ts < endMs) {
+        chunks.push(b.data)
+        collected += b.data.length
+      }
     }
+    // 兜底：时间窗匹配为空 → 回退取尾部 PRE_ROLL_MS
+    if (chunks.length === 0) {
+      const targetBytes = Math.round((this.PRE_ROLL_MS || PRE_ROLL_DEFAULT_MS) / 1000 * 16000 * 2)
+      for (let i = this.preRollBuffer.length - 1; i >= 0; i--) {
+        chunks.unshift(this.preRollBuffer[i].data)
+        collected += this.preRollBuffer[i].data.length
+        if (collected >= targetBytes) break
+      }
+    }
+    const merged = new Uint8Array(collected)
+    let off = 0
+    for (const c of chunks) {
+      merged.set(c, off)
+      off += c.length
+    }
+    return merged
+  }
+
+  /** 从环形缓存切出最近 ms 毫秒的音频段（供端点判定 smart-turn，改造清单#7） */
+  private _sliceRecentMs(ms: number): Uint8Array | null {
+    if (this.preRollBuffer.length === 0) return null
+    const now = performance.now()
+    const startTs = now - ms
+    const chunks: Uint8Array[] = []
+    let collected = 0
+    for (const b of this.preRollBuffer) {
+      if (b.ts == null) continue
+      if (b.ts >= startTs) {
+        chunks.push(b.data)
+        collected += b.data.length
+      }
+    }
+    if (chunks.length === 0) return null
     const merged = new Uint8Array(collected)
     let off = 0
     for (const c of chunks) {
@@ -357,20 +440,25 @@ export class VoicePipeline {
       modelURL: `${base}silero_vad.onnx`,
       workletURL: `${base}vad.worklet.bundle.min.js`,
       stream: this.stream!,
-      // ── 前端 VAD 判定（体感层）：连续 6 帧过阈值=576ms 判定为人声 ──
+      // ── 前端 VAD 判定（体感层）：512 帧(32ms) → 连续 6 帧过阈值≈192ms 判定为人声 ──
       // 判定为人声 → 启动 ducking（音量降到 20% 继续播）+ 上报 speech_start 给后端
       // 后端做二次确认（~16ms）：barge_reject 恢复 / barge_confirm 进入静音等待
+      frameSamples: 512,  // 对齐后端（512=32ms/帧）：触发更快（6帧≈192ms），帧级判定更细但噪声下更抖
       onSpeechStart: () => {
         console.log('[VAD] onSpeechStart（判定为人声 → ducking + 上报）')
         // 0. 记录用户开口时刻（用于算打断延迟：开口 → 停止播报）
         this.speechStartTime = performance.now()
         this.bargeConfirmed = false  // 新一轮判定开始，重置后端确认标记
+        // 0.5 重置话段缓冲并以预卷种子覆盖开口初期（VAD 判定 6 帧≈192ms 期间已过的帧）
+        this.utteranceAudio = []
+        this.speechActive = true
+        const seed = this._slicePreRoll(this.speechStartTime)
+        if (seed && seed.byteLength > 0) this._writeUtterance(seed)
         // 1. 启动 ducking：gainNode.gain → 0.2，**不静音不销毁播放器**，只是小声继续播
         //    只有球球正在播放时才需要 ducking；球球没在播（如 listening 态）就跳过
         this.startDucking()
-        // 2. 从环形缓存切出「回退 256ms」的预卷，补 VAD 触发延迟/后端保护期吞掉的首字
-        //    （Electron 早期版传 null → 打断后补首字只能靠含球球回声的 cache → 前半丢字）
-        const preRoll = this._slicePreRoll()
+        // 2. 从环形缓存切预卷（改造清单#1：以判定窗口起点为锚，覆盖开口最开头）
+        const preRoll = this._slicePreRoll(this.speechStartTime)
         const preRollBase64 = preRoll ? this._arrayBufferToBase64(preRoll.buffer as ArrayBuffer) : null
         // 3. 上报 speech_start 给后端（带预卷 + 前端是否仍在播）。
         //    isPlaying：若后端已 listening（playback_done 兜底/竞态提前关了打断窗口）
@@ -381,18 +469,35 @@ export class VoicePipeline {
           isPlaying: this._hasActivePlayback(),
         })
       },
-      // ── 用户说完（连续 10 帧静音=960ms 判定人声结束）──
+      // ── 用户说完（连续 20 帧静音 = 640ms 判定人声结束；frameSamples=512=32ms/帧）──
       onSpeechEnd: () => {
         console.log('[VAD] onSpeechEnd（上报 speech_end）')
-        // 记录用户输入完成时刻（用于真实端到端延迟：说完 → 第一帧出声）
+        // 记录用户输入完成时刻（用于真实端到端延迟：说完 → 第一帧出声）。
+        // 口径（用户确认）：每次 VAD 判定结束都刷新——补充说话/补充窗口场景下，
+        // "最后一次说完"自然覆盖前面的碎片；首帧播放时才一次性换算（751 行）。
         this.userSpeechFinishTs = performance.now()
         // 语义 A 下：确认打断（barge_confirm）时已直接 stopStreamPlayback 销毁播放器，
         // 无需在这里做 confirmedDucking 兜底。
         // 重要：非打断场景（球球刚播完用户开口，后端走 listening 分支不发 barge_reject）
         // 也必须恢复音量，否则 ducking 会一直卡着球球声音变小
         this.stopDucking()
-        // 上报人声结束
-        this._control({ type: 'speech_end' })
+        // 上报人声结束（改造清单#7：携带"该说话段"音频，供后端 smart-turn 端点判定
+        // "是否说完"——若判可能未完，后端开补充窗口等续说）
+        // 窗口口径：整段话（onSpeechStart 起含预卷与尾静音，≤8s 保尾），与上游一致；
+        // 实测（scripts/smart_turn_probe.py）整段话判别显著优于"最近 1.6s"切片
+        this.speechActive = false
+        const seg = this._concatUtterance()
+        if (seg && seg.byteLength > 0) {
+          this._control({ type: 'speech_end', audioB64: this._arrayBufferToBase64(seg.buffer as ArrayBuffer) })
+        } else {
+          // 兜底：缓冲异常为空（如种子/累计失败）→ 退回最近 8s 切片
+          const fallback = this._sliceRecentMs(this.SMART_TURN_MAX_MS)
+          if (fallback && fallback.byteLength > 0) {
+            this._control({ type: 'speech_end', audioB64: this._arrayBufferToBase64(fallback.buffer as ArrayBuffer) })
+          } else {
+            this._control({ type: 'speech_end' })
+          }
+        }
       },
       // ── 误报（VAD 判定后又反悔，可能是噪声短暂过线）──
       onVADMisfire: () => {
@@ -421,7 +526,7 @@ export class VoicePipeline {
       positiveSpeechThreshold: this.posTh,
       negativeSpeechThreshold: this.negTh,
       minSpeechFrames: 6,
-      redemptionFrames: 10,
+      redemptionFrames: 20,         /* 静音尾长一帧32ms */
       preSpeechPadFrames: 1,
     })
     this.vad.start()
@@ -580,14 +685,16 @@ export class VoicePipeline {
           }
         }, this.BARGE_RESUME_TIMEOUT_MS)
         this.bargeConfirmed = true  // 标记：后端已确认打断（misfire 不再反向恢复）
-        this.speechStartTime = null
-        // 打断后转回 listening（等下一轮 reply/tts_start 再切 speaking）
-        this.onState?.('listening')
-        // 上报打断延迟（testboard 同款：开口→barge_confirm 的真实延迟）
+        // 改造清单#3：上报打断延迟必须先于清空 speechStartTime（fix 死代码）。
+        // 口径注意：起点为 VAD 确认人声时机（onSpeechStart 触发时刻），
+        // 不含前端 VAD 判定窗口（6 帧 ≈ 576ms）。
         if (this.speechStartTime !== null) {
           const totalMs = performance.now() - this.speechStartTime
           this._control({ type: 'barge_latency', latency: parseFloat((totalMs / 1000).toFixed(3)) })
         }
+        this.speechStartTime = null
+        // 打断后转回 listening（等下一轮 reply/tts_start 再切 speaking）
+        this.onState?.('listening')
         break
       }
       case 'barge_reject':
@@ -765,6 +872,8 @@ export class VoicePipeline {
     if (this.playbackDoneTimer) { clearTimeout(this.playbackDoneTimer); this.playbackDoneTimer = null }
     // 清「静音等待恢复」状态（播放器已销毁，无需恢复）
     if (this.bargeResumeTimer) { clearTimeout(this.bargeResumeTimer); this.bargeResumeTimer = null }
+    // 清 ducking 兜底定时器（播放器已销毁，2s 保险丝不再需要；避免残留空转）
+    if (this.duckingTimer) { clearTimeout(this.duckingTimer); this.duckingTimer = null }
     this.pendingBargeResume = false
     if (this.playbackCtx) {
       // 1. 立即静音（gain 瞬间归零，消除残音）
@@ -803,6 +912,8 @@ export class VoicePipeline {
     this.userSpeechFinishTs = null
     this.playFirstFrameTs = null
     this.preRollBuffer = []
+    this.utteranceAudio = []
+    this.speechActive = false
     this.kwsUnsub?.()
     this.kwsUnsub = null
     if (this.vad) { try { this.vad.destroy() } catch { /* ignore */ } this.vad = null }

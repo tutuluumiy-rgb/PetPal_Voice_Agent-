@@ -31,6 +31,9 @@ BASH_EXECUTABLE = shutil.which("bash.exe") or shutil.which("bash")
 BASH_TIMEOUT_SECONDS = 20
 BASH_MAX_TIMEOUT_SECONDS = 120
 BASH_MAX_COMMAND_CHARS = 4000
+# F3 审计修复：语音链路默认禁用 bash（防 RCE 面）；工作模式确需使用时
+# 显式设 ALLOW_BASH=1 再重启后端。
+ALLOW_BASH = os.getenv("ALLOW_BASH", "0") == "1"
 
 
 def _terminate_process(process) -> None:
@@ -75,6 +78,11 @@ def _collect_process_output(process, output_file, overflow_event) -> None:
 
 
 def bash(command: str, timeout: int | float | None = None) -> ToolOutput:
+    if not ALLOW_BASH:
+        raise RuntimeError(
+            "bash 工具已禁用（安全默认关闭）。如确需在工作模式使用，"
+            "请设置环境变量 ALLOW_BASH=1 后重启后端。"
+        )
     if not isinstance(command, str) or not command.strip():
         raise ValueError("command 不能为空")
     if len(command) > BASH_MAX_COMMAND_CHARS:

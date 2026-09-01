@@ -56,6 +56,26 @@ function enforceLockedSize(win: BrowserWindow, targetW: number, targetH: number,
   }
 }
 
+/** F5 审计修复：外部打开 URL 仅放行 https://（其余 scheme/地址拒绝，避免恶意跳转） */
+function safeOpenExternal(url: string): void {
+  let u: URL | null = null
+  try {
+    u = new URL(url)
+  } catch {
+    /* ignore */
+  }
+  if (u && u.protocol === 'https:') {
+    shell.openExternal(url)
+  } else {
+    console.warn('[security] 拦截外部打开（仅放行 https）:', url)
+  }
+}
+
+/** F5 审计修复：阻止渲染进程内导航（配合 sandbox:true，防远程页接管 IPC/麦克风） */
+function lockNavigation(win: BrowserWindow): void {
+  win.webContents.on('will-navigate', (event) => event.preventDefault())
+}
+
 /** 加载渲染页面：dev 走 Vite dev server，prod 走 out/renderer 静态文件 */
 function loadRenderer(win: BrowserWindow, page: 'pet.html' | 'chat.html' | 'panel.html'): void {
   const devUrl = process.env['ELECTRON_RENDERER_URL']
@@ -96,10 +116,11 @@ export function createPetWindow(): BrowserWindow {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      sandbox: true
     }
   })
 
+  lockNavigation(petWindow)
   petWindow.setAlwaysOnTop(true, 'floating')
   // 硬锁尺寸：min=max=220×240，即使 OS/Electron 想改变也无法超越（治本于累积放大）
   petWindow.setMinimumSize(PET_WINDOW_SIZE.width, PET_WINDOW_SIZE.height)
@@ -114,7 +135,7 @@ export function createPetWindow(): BrowserWindow {
   enforceLockedSize(petWindow, PET_WINDOW_SIZE.width, PET_WINDOW_SIZE.height, 'pet-init')
 
   petWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url)
+    safeOpenExternal(url)
     return { action: 'deny' }
   })
 
@@ -173,9 +194,10 @@ export function createChatWindow(): BrowserWindow {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      sandbox: true
     }
   })
+  lockNavigation(chatWindow)
   chatWindow.setAlwaysOnTop(true, 'floating')
   // 硬锁尺寸：min=max=350×550，杜绝任何累积放大
   chatWindow.setMinimumSize(CHAT_PANEL_SIZE.width, CHAT_PANEL_SIZE.height)
@@ -190,7 +212,7 @@ export function createChatWindow(): BrowserWindow {
   enforceLockedSize(chatWindow, CHAT_PANEL_SIZE.width, CHAT_PANEL_SIZE.height, 'chat-init')
 
   chatWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url)
+    safeOpenExternal(url)
     return { action: 'deny' }
   })
   chatWindow.on('closed', () => {
@@ -308,9 +330,10 @@ export function createPanelWindow(): BrowserWindow {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      sandbox: true
     }
   })
+  lockNavigation(panelWindow)
 
   panelWindow.once('ready-to-show', () => {
     const win = panelWindow
@@ -329,7 +352,7 @@ export function createPanelWindow(): BrowserWindow {
   })
 
   panelWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url)
+    safeOpenExternal(url)
     return { action: 'deny' }
   })
 

@@ -88,6 +88,10 @@ class MiniMaxTTS(TTSProvider):
         self.base_url = os.getenv("MINIMAX_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
         self.transport = os.getenv("MINIMAX_TRANSPORT", "http").strip().lower()  # ws|http
         self.sample_rate = int(os.getenv("MINIMAX_SAMPLE_RATE", "24000"))
+        if self.sample_rate != 24000:
+            # F6 审计修复：前端播放按 24k 硬编码，采样率漂移会造成变速/时长错误 → 强制锁定
+            print(f"[warn] MINIMAX_SAMPLE_RATE={self.sample_rate} 与前端 24k 播放不匹配，已强制 24000")
+            self.sample_rate = 24000
         self.audio_format = os.getenv("MINIMAX_FORMAT", "pcm").strip().lower()
         self.text_normalization = os.getenv("MINIMAX_TEXT_NORMALIZATION", "false").strip().lower() in ("1", "true", "yes")
         if not self.api_key:

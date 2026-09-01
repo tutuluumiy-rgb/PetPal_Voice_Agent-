@@ -1,7 +1,7 @@
-/** 新增契约探针：voice:voices / model:get|set|check|list / history:delete（连 Mock 9000） */
+/** 新增契约探针：voice:voices / model:get|set|check|list / history:delete（连 Mock 9100） */
 import { GatewayClient } from '../main/services/gateway.ts'
 
-const URL = process.env.MOCK_WS_URL ?? 'ws://127.0.0.1:9000/ws'
+const URL = process.env.MOCK_WS_URL ?? 'ws://127.0.0.1:9100/ws'
 let failures = 0
 function check(name: string, ok: boolean, extra = ''): void {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${extra ? '  (' + extra + ')' : ''}`)

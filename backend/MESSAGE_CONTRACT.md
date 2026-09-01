@@ -61,6 +61,8 @@
 | 任意 | `idle` | 前端上报 `user_abort` | `backend_state_change: idle` |
 | 任意 | `error` | LLM 等异常 | `backend_state_change: error` |
 
+> 注（审计 F6）：当前实现 LLM/工具异常统一走 `listening`（reason=llm_error），`error` 态**从不产出**；测试看板按 `listening` 展示即可。
+
 **speaking 不因 TTS 发送完退出**：后端发完 TTS 只是开始播放，必须等
 `client_playback_done` 才回 `listening`。
 
@@ -100,9 +102,10 @@
 ### 3.4 `speech_end`（语义别称：`vad_speech_end`）
 前端 VAD 判定「人声结束」。
 ```json
-{ "type": "speech_end" }
+{ "type": "speech_end", "audioB64": "<可选：该说话段整段话 16k PCM 的 base64>" }
 ```
-- 后端据此触发最终识别 `asr_final`。
+- 后端据此触发最终识别 `asr_final`；
+- `audioB64`（可选）：携带该说话段整段话（`onSpeechStart` 起累计，含预卷与尾静音，超 8s 保尾，见前端 `SMART_TURN_MAX_MS`）→ 后端 smart-turn 端点判定"是否已说完"（p>0.5 直接提交 / p≤0.5 开补充窗口）。缺失时按 `SMART_TURN_FALLBACK` 处理。
 - > wire type 为 `speech_end`（向后兼容测试看板）；语义上等价于 `vad_speech_end`。
 
 ### 3.5 `vad_cancel`
@@ -126,7 +129,8 @@
 ```
 - 后端才从 `speaking` 切回 `listening` 并启动尾音保护期。**关键：这是「播放结束」与「TTS 发送完」分离的信号。**
 
-### 3.8 `client_barge_in`
+### 3.8 `client_barge_in`（⚠️ 遗留/已废弃）
+历史"本地打断"通道（旧前端/看板兼容）。当前 Electron 前端**不再发送**此消息（改用 `speech_start + barge_latency`），后端保留实现仅向后兼容——新协议请勿依赖。
 前端本地打断（检测到插话）。
 ```json
 { "type": "client_barge_in", "latency": 0.312, "preRollBase64": "<base64 PCM 或 null>" }
@@ -142,19 +146,20 @@
 ```
 - 后端累计并回发 `barge_avg`。
 
-### 3.10 `user_abort`（新增）
+### 3.10 `user_abort`（⚠️ 遗留/可选）
 用户/系统主动中止本次对话（立即终止全链路）。
 ```json
 { "type": "user_abort" }
 ```
 - 后端：终止 LLM 推理、终止工具调用、取消 TTS、清空 buffer、复位 `idle`。
+- 注意（安全/链路审计 F6）：当前 Electron 前端（VoicePipeline.ts）**不发送** `user_abort/stop`（仅断开连接）；后端保留实现向后兼容。若需"全链路中止"语义，需前端补发此消息。
 
-### 3.11 `stop`（测试看板兼容，Electron 可选）
+### 3.11 `stop`（测试看板兼容，Electron 不发）
 停止当前播报，复位 `listening`（不断开连接）。
 ```json
 { "type": "stop" }
 ```
-- 兼容旧测试看板按钮；Electron 建议用 `user_abort` 表达更强语义。
+- 兼容旧测试看板按钮；Electron 不发送。
 
 ---
 
@@ -241,7 +246,7 @@ ASR 最终识别（用户一句话识别完毕）。
 ```
 
 ### 4.12 `resume_playback`
-打断被判定无有效输入 → 恢复之前被打断的播报音量。
+- 语义（链路审计 F6 修正）：语义 A 下 `barge_confirm` 已销毁播放器，`resume_playback` 实际只让前端**清理打断残留状态**（前端 stopDucking 恢复音量标记），并非"恢复被打断的播报"；被打断播报的真正恢复走 `reply + tts` 重发（后端 `_resume_suspended_reply`）。
 ```json
 { "type": "resume_playback" }
 ```
@@ -251,15 +256,17 @@ ASR 最终识别（用户一句话识别完毕）。
 ```json
 { "type": "stop_playback" }
 ```
+> 补充（审计 F6 登记）：后端首轮回复前还会发 `stop_placeholder`（切断占位音频），Electron 自定义播放器未消费但网络协议已登记；`PlaceholderPlayer` 模块在仓库中不存在（历史注释残留）。
 
 ### 4.14 `timing`
-每轮耗时统计（current + avg）。
+每轮耗时统计（current + avg）。注意（审计 F6）：`total` 字段已废弃移除；含附加字段 `avg_count`（计入 avg 的轮数）。
 ```json
 {
   "type": "timing",
-  "current": { "asr": 0.3, "llm_first_token": 0.1, "llm_first_sentence": 0.9, "tts_first_packet": 0.9, "e2e": 1.5, "total": 2.1, "interrupted": false },
-  "avg": { "asr": 0.25, "llm_first_token": 0.12, "llm_first_sentence": 0.85, "tts_first_packet": 0.9, "e2e": 1.4, "total": 2.0 },
-  "count": 3
+  "current": { "asr": 0.3, "llm_first_token": 0.1, "llm_first_sentence": 0.9, "tts_first_packet": 0.9, "e2e": 1.5, "interrupted": false },
+  "avg": { "asr": 0.25, "llm_first_token": 0.12, "llm_first_sentence": 0.85, "tts_first_packet": 0.9, "e2e": 1.4 },
+  "count": 3,
+  "avg_count": 2
 }
 ```
 - 字段单位均为秒；`interrupted: true` 表示该轮被打断（部分数据）。

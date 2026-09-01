@@ -11,7 +11,7 @@
  */
 import { GatewayClient } from '../main/services/gateway.ts'
 
-const URL = process.env.MOCK_WS_URL ?? 'ws://127.0.0.1:9000/ws'
+const URL = process.env.MOCK_WS_URL ?? 'ws://127.0.0.1:9100/ws'
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
 let failures = 0

@@ -2,7 +2,7 @@
  * 后端网关 — 纯协议客户端（无 Electron 依赖，可在普通 Node 下独立测试）
  * --------------------------------------------------------------------------
  * 对接 Mock 后端（backend/mock_server.py）或后续同一契约的真实后端：
- *   WebSocket: ws://127.0.0.1:9000/ws
+ *   WebSocket: ws://127.0.0.1:9100/ws（Mock；真实后端 8001 /ws/mgmt 同契约）
  * 协议：backend/docs/MOCK_CONTRACT.md（方案 A）
  *   - 握手：连接建立后先发 { type:'auth', id, clientId, token } → auth:ok
  *   - 请求：{ type:'<op>', id, ...业务字段 } → 以 <op>:ok / <op>:error 关联 id 返回
@@ -17,6 +17,7 @@
  * 本类保持纯净：不 import electron，便于写独立 probe 脚本联调验证。
  */
 import WebSocket from 'ws'
+import net from 'net'
 import type {
   HistoryPage,
   HistoryDetail,
@@ -85,7 +86,7 @@ function errorTypeFor(op: string): string {
 }
 
 export interface GatewayClientOptions {
-  /** 主后端连续失败 N 次后自动切到的备用地址（如 Mock 9000） */
+  /** 主后端连续失败 N 次后自动切到的备用地址（如 Mock 9100） */
   fallbackUrl?: string
   /** 主后端连续失败多少次触发回退（默认 2：1s+2s 后即切备用，避免开发期等太久） */
   fallbackAfterAttempts?: number
@@ -116,6 +117,8 @@ export class GatewayClient {
   private resolveReady: (() => void) | null = null
   private heartbeatTimer: NodeJS.Timeout | null = null
   private reconnectTimer: NodeJS.Timeout | null = null
+  /** 处于 fallback(Mock) 时，定期探测主后端端口；恢复后自动切回主端 */
+  private primaryProbeTimer: NodeJS.Timeout | null = null
   private reconnectAttempt = 0
   private lastStatusAt = 0
 
@@ -151,6 +154,7 @@ export class GatewayClient {
   close(): void {
     this.closedByUser = true
     this._clearHeartbeat()
+    this._clearPrimaryProbe()
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer)
       this.reconnectTimer = null
@@ -215,7 +219,7 @@ export class GatewayClient {
     const wait = Math.min(30_000, 1000 * 2 ** this.reconnectAttempt)
     this.reconnectAttempt += 1
     this._setStatus('disconnected')
-    // 主后端连续不可达 → 切备用（Mock 9000）；备用也持续不可达 → 回主后端重试。
+    // 主后端连续不可达 → 切备用（Mock 9100）；备用也持续不可达 → 回主后端重试。
     // 防止“粘死在备用地址”上：主后端恢复后能自动接回，无需重启 App。
     if (this.fallbackUrl && this.url !== this.fallbackUrl && this.reconnectAttempt >= this.fallbackAfterAttempts) {
       this.url = this.fallbackUrl
@@ -352,6 +356,7 @@ export class GatewayClient {
       this._setStatus('connected')
       this.resolveReady?.()
       this._startHeartbeat()
+      this._maybeStartPrimaryProbe()
       return
     }
     if (t === 'pong') {
@@ -406,6 +411,17 @@ export class GatewayClient {
     // 按 id 关联拒绝挂起的请求，避免「后端报错但前端一直等到超时」。
     if (t === '_.error' || t === '_:error') {
       const eid = msg.id
+      // 握手被拒（auth token 与后端 MGMT_TOKEN 失配）：不静默挂死——
+      // 断开触发退避重连；主端持续失配会自动回退 fallback（Mock），UI 不至于全挂。
+      if (msg.code === 'E_UNAUTHORIZED' && typeof eid === 'string' && eid.startsWith('h-')) {
+        console.error('[gw] auth rejected (MGMT_TOKEN mismatch?), closing and retrying...')
+        try {
+          this.ws?.close()
+        } catch {
+          /* ignore */
+        }
+        return
+      }
       if (typeof eid === 'string') {
         const p = this.pending.get(eid)
         if (p) {
@@ -451,6 +467,47 @@ export class GatewayClient {
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer)
       this.heartbeatTimer = null
+    }
+  }
+
+  // ---------- 主后端探活（避免「粘死在 Mock 上」） ----------
+  // 场景：主后端 8001 挂掉时网关会回退到 fallback(Mock 9100)，此时只要 Mock 一直
+  // 可达，旧逻辑永远不会再尝试主后端——即使真实后端已恢复，面板仍显示 Mock 假数据。
+  // 修复：处于 fallback 时，每 15s 探测一次主后端端口，一旦恢复立即切回主端。
+
+  private _maybeStartPrimaryProbe(): void {
+    this._clearPrimaryProbe()
+    if (!this.fallbackUrl || this.url !== this.fallbackUrl) return // 已在主端，无需探活
+    this.primaryProbeTimer = setInterval(() => this._probePrimaryNow(), 15_000)
+    this._probePrimaryNow()
+  }
+
+  private _probePrimaryNow(): void {
+    try {
+      const u = new URL(this.primaryUrl)
+      const port = Number(u.port || (u.protocol === 'wss:' ? 443 : 80))
+      const sock = net.connect({ host: u.hostname, port }, () => {
+        sock.destroy()
+        if (this.url === this.primaryUrl) {
+          this._clearPrimaryProbe() // 防御：已切回主端则停止探活
+          return
+        }
+        console.log(`[gw] primary backend back online, switching back to ${this.primaryUrl}`)
+        this._clearPrimaryProbe()
+        this.close()
+        this.url = this.primaryUrl
+        this.connect()
+      })
+      sock.on('error', () => sock.destroy())
+    } catch (err) {
+      console.warn('[gw] primary probe failed:', err)
+    }
+  }
+
+  private _clearPrimaryProbe(): void {
+    if (this.primaryProbeTimer) {
+      clearInterval(this.primaryProbeTimer)
+      this.primaryProbeTimer = null
     }
   }
 

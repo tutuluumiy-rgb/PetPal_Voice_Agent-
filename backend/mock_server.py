@@ -336,7 +336,10 @@ async def ws_endpoint(ws: WebSocket):
 
 
 if __name__ == "__main__":
+    import os
     import uvicorn
-    port = 9000
-    print(f"[mock] PetPal Mock 后端启动 → ws://127.0.0.1:{port}/ws   (0.0.0.0:{port})")
+    # 默认 9100：9000 常被本机其他服务（如 Docker Desktop 的 com.docker.backend）占用，
+    # 网关 fallback 若连到错误端口会一直 auth 超时。可用环境变量 MOCK_PORT 覆盖。
+    port = int(os.getenv("MOCK_PORT", "9100"))
+    print(f"[mock] PetPal Mock 后端启动 → ws://127.0.0.1:{port}/ws   (0.0.0.0:{port})  （MOCK_PORT 可覆盖）")
     uvicorn.run(app, host="0.0.0.0", port=port)

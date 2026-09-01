@@ -16,11 +16,15 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import uuid
 
 from fastapi import WebSocket, WebSocketDisconnect
 
 from prompt_loader import get_active_user_id
+
+# F2 审计修复：sessionId/userId 白名单（防路径穿越/任意文件删除）
+_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROMPTS_DIR = os.path.join(BASE_DIR, "prompts")
@@ -207,10 +211,16 @@ def register_mgmt(app) -> None:
                 mtype = msg.get("type", "")
                 mid = msg.get("id")
 
-                # 握手 / 心跳
+                # 握手 / 心跳（F1 审计修复：auth 需携带正确 token；env MGMT_TOKEN 覆盖默认）
                 if mtype == "auth":
-                    authed = True
-                    await _send(ws, {"type": "auth:ok", "id": mid, "clientId": client_id})
+                    token = msg.get("token") or ""
+                    import os as _os
+                    expected = _os.getenv("MGMT_TOKEN", "fake-token")
+                    if token and token == expected:
+                        authed = True
+                        await _send(ws, {"type": "auth:ok", "id": mid, "clientId": client_id})
+                    else:
+                        await _err(ws, mid, "E_UNAUTHORIZED", "token 无效")
                 elif mtype == "ping":
                     await _send(ws, {"type": "pong", "id": mid})
                 elif not authed:
@@ -319,6 +329,8 @@ def register_mgmt(app) -> None:
                     sid = msg.get("sessionId") or ""
                     if not sid:
                         await _err(ws, mid, "E_VALIDATION", "缺少 sessionId")
+                    elif not _SAFE_ID_RE.match(sid):
+                        await _err(ws, mid, "E_VALIDATION", "sessionId 不合法")  # F2 审计修复：防任意文件删除
                     else:
                         path = os.path.join(SESSIONS_DIR, f"{sid}.jsonl")
                         if os.path.exists(path):

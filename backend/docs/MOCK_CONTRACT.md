@@ -5,7 +5,7 @@
 > 供前端开发/联调界面。后续接真实后端时**应遵守同一份契约**，仅替换数据来源。
 >
 > 依据：`frontend/docs/后端对接交底.md`（方案 A）已在本文件落为具体字段/格式/错误码。
-> 传输：WebSocket 长连接 `ws://127.0.0.1:9000/ws`（默认端口 9000）。
+> 传输：WebSocket 长连接 `ws://127.0.0.1:9100/ws`（默认端口 9100；`MOCK_PORT` 可覆盖）。
 
 ---
 
@@ -179,11 +179,14 @@ auth:policy:set → { "type":"auth:policy:set", "id", "policy": "full" } → ok
 
 ```powershell
 cd backend
-python mock_server.py          # 监听 0.0.0.0:9000，endpoint /ws
+python mock_server.py          # 监听 0.0.0.0:9100，endpoint /ws（MOCK_PORT 可覆盖）
 ```
 
-访问地址：**`ws://127.0.0.1:9000/ws`**（局域网使 IP 用 `0.0.0.0` 绑定的本机 IP）。
+访问地址：**`ws://127.0.0.1:9100/ws`**（局域网使 IP 用 `0.0.0.0` 绑定的本机 IP）。
 不连真数据库/LLM/TTS，全部假数据，前端可随时重启、无副作用。
+
+> 端口说明：默认 **9100**（旧 9000 常被本机其他服务如 Docker Desktop 占用，
+> 网关 fallback 连到错误端口会导致管理面板一直鉴权超时看不到数据）。
 
 ## 6. 真实后端管理端点（v1.1）
 
@@ -202,6 +205,6 @@ ws://127.0.0.1:8001/ws/mgmt
   - `voice:settings:*` → `backend/data/voice_settings.json`（持久化；`voice` 映射进 TTS 语气指令）
   - `auth:policy:*` → `approval_policy`；`mode:*` → `mode_state`
   - `history:*` → `backend/sessions/*.jsonl`（按 `run_id` 聚合）
-- **前端网关地址**：环境变量 `PETPAL_MGMT_WS_URL` 覆盖（默认 `ws://127.0.0.1:9000/ws` = Mock；跑真实后端时设 `ws://127.0.0.1:8001/ws/mgmt`）。
+- **前端网关地址**：主后端 `PETPAL_MGMT_WS_URL`（默认 `ws://127.0.0.1:8001/ws/mgmt`）；连不上自动回退 Mock `PETPAL_MOCK_WS_URL`（默认 `ws://127.0.0.1:9100/ws`）。
 
 联调顺序建议（与交底文档一致）：`auth` → `mode:get` / `chat:send` → `tts:start/end` → `history` → `personality/user` → `voice:settings` → `auth:policy` → `chat:abort`。
