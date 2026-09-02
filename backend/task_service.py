@@ -181,8 +181,10 @@ class SessionWorker:
                       file=_sys.stderr, flush=True)
                 print(f"[任务][Worker][工具]     结果: {res}", file=_sys.stderr, flush=True)
 
-        msgs = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user}]
-        # 复用 agent_runtime 的主循环（原生 function calling 多轮工具），只收集 reply 文本
+        # ⚠️ 任务内容必须写入 Worker 自己的会话存档：run_agent_loop 不接收外部
+        # messages，而是从 session.transcript() 重建上下文（build_model_context）。
+        # 之前把 user 任务只放在局部变量里 → Worker 看不到目标 → 回"未收到任务内容"。
+        self.store.add("user", user, run_id=f"task-{taskId}", sub_turn=1)
         parts: list[str] = []
         sub_turn_seen = 0
         async for ev in run_agent_loop(

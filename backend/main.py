@@ -2221,7 +2221,10 @@ async def _announce_task_done(ws, session, status: str, text: str):
     print(f"[任务][通知] 等待安全播报时机（status={status}）…", file=_sys.stderr, flush=True)
     for _ in range(_ANNOUNCE_RETRY_TIMES):
         try:
-            if session.state == "listening" and not session.is_user_speaking:
+            # 不抢播：listening + 用户未在说话 + 主回复的排队 TTS 已播完
+            tt = getattr(session, "tts_task", None)
+            tts_busy = tt is not None and not tt.done()
+            if session.state == "listening" and not session.is_user_speaking and not tts_busy:
                 print(f"[任务][通知] 播报: {message[:60]}", file=_sys.stderr, flush=True)
                 await tts.speak_and_send(ws, message, session.session_id, {"emotion": "平静"})
                 return

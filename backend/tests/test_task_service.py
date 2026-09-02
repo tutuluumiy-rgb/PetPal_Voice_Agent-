@@ -120,6 +120,7 @@ class FakeSession:
     state = "listening"
     is_user_speaking = False
     session_id = "test-sess"
+    tts_task = None  # 播报守卫检查：无排队的 TTS
 
 
 # ── 测试 ────────────────────────────────────────────
@@ -147,6 +148,12 @@ async def t_a_delegate_complete():
         row = _get_task(task_id)
         check("任务最终 succeeded", row is not None and row["status"] == "succeeded",
               f"status={row and row['status']}")
+        # 回归：任务内容必须写入 Worker 自己的会话存档（否则模型回"未收到任务内容"）
+        worker = _svc()._workers[sess.session_id]
+        t = worker.store.transcript()
+        check("Worker 会话含任务内容",
+              bool(t) and t[0].get("role") == "user" and "6 乘以 7" in str(t[0].get("content", "")),
+              str(t[0])[:60] if t else "transcript 为空")
         check("结果文本已保存", row and "四十二" in (row.get("result") or ""),
               f"result={row and (row.get('result') or '')[:30]!r}")
         st = await get_task_status(task_id)
