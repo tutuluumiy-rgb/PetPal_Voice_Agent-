@@ -2218,9 +2218,9 @@ async def _announce_task_done(ws, session, status: str, text: str):
     等当前 turn 安全回到 listening 再播；连接断开或超时则静默放弃。"""
     import sys as _sys
     if status == "succeeded":
-        message = f"任务完成。{text}"
+        message = f"任务状态：已完成——{text}"
     elif status == "failed":
-        message = "有个后台任务失败了，抱歉哦，你可以让我重新做一次。"
+        message = "任务状态：失败——抱歉，后台任务没有成功，你可以让我重新做一次。"
     else:
         return  # cancelled：静默
     print(f"[任务][通知] 等待安全播报时机（status={status}）…", file=_sys.stderr, flush=True)

@@ -31,8 +31,55 @@ TASK_TIMEOUT_S = float(os.getenv("TASK_TIMEOUT_S", "600"))
 WORKER_ROLE = (
     "## 角色\n"
     "你现在是一名【后台任务执行 Agent】：只执行委派给你的任务并输出最终结果，"
-    "不需要与用户对话、不需要寒暄、不要反问。直接动手做，做完用简洁的中文输出结果。"
+    "不需要与用户对话、不需要寒暄、不要反问。直接动手做，做完用简洁的中文输出结果。\n"
+    "## 工具使用\n"
+    "- 文件操作用 write（写入）/ edit（修改）/ read（读取），**禁止使用 bash**（后台不可执行命令，"
+    "bash 不在你的工具列表里）。\n"
+    "- 联网查信息用 web_search，查天气用 get_weather，算数用 calculator。\n"
+    "- 只输出最终结果文本（供语音播报），不要输出过程日志。"
 )
+
+# ── Worker 可用工具集：工作模式全量，但剔除 bash（后台不执行命令）──
+from tools.loader import build_tools_list as _build_tools_list
+WORKER_TOOLS = [t for t in _build_tools_list("work") if t["function"]["name"] != "bash"]
+
+
+async def _send_ctx(ws, text: str):
+    """向前端消息区发一条上下文旁注（不阻塞，失败静默）。"""
+    if ws is None:
+        return
+    try:
+        await ws.send_json({"type": "context_text", "text": text})
+    except Exception:
+        pass
+
+
+async def _short_summary(goal: str, result: str, client=None, model=None) -> str:
+    """把后台任务的完整结果压缩成一句 ≤40 字的播报句（LLM 加工；失败回退截断）。
+
+    用户要求：结果给主 Agent 过一遍、简单回复、不要长篇大论进 TTS。
+    完整结果仍保存在 tasks.result（get_task_status 可查全文）。
+    """
+    prompt = (
+        "下面是一条后台任务的执行结果。请用一句（不超过 40 字）口语化中文总结"
+        "「完成了什么 + 关键结论/位置」，适合语音播报，不要复述过程细节，不要输出序号列表：\n"
+        f"任务目标：{goal}\n执行结果：{result}"
+    )
+    if client is not None:
+        try:
+            resp = await client.chat.completions.create(
+                model=model, messages=[{"role": "user", "content": prompt}],
+                max_tokens=80, temperature=0.4, stream=False,
+            )
+            choices = getattr(resp, "choices", None) or []
+            if choices:
+                content = getattr(getattr(choices[0], "message", None), "content", None)
+                if isinstance(content, str) and content.strip():
+                    return content.strip()[:40]
+        except Exception:
+            pass
+    flat = result.replace("\n", " ").strip()
+    return flat[:40]
 
 
 # ── 当前会话上下文钩子 ─────────────────────────────
@@ -190,6 +237,7 @@ class SessionWorker:
         async for ev in run_agent_loop(
             client, model, "work", system_prompt, self.store,
             run_id=f"task-{taskId}", timeout=timeout, on_tool=_worker_on_tool,
+            tools_override=WORKER_TOOLS,
         ):
             kind = ev[0]
             if kind == "sub_turn":
@@ -258,6 +306,7 @@ class TaskService:
             _update_task(taskId, status="running")
             print(f"[任务] {taskId} → running（Worker 后台执行中）",
                   file=_sys.stderr, flush=True)
+            await _send_ctx(ws, "任务状态：已在后台开始处理，完成后我会告诉你结果。")
             # Worker 固定按工作模式选模型（默认 DeepSeek）；测试可替换 main.worker_llm
             _worker_llm = getattr(_main, "worker_llm", None) or get_llm_for_mode("work")
             client = _worker_llm.client
@@ -267,12 +316,14 @@ class TaskService:
                 worker.run_task(taskId, goal, detail, output_format, client, model, timeout),
                 timeout=TASK_TIMEOUT_S,
             )
+            # 结果压缩成一句播报（完整结果仍存 tasks.result 全文）
+            short = await _short_summary(goal, text, client, model)
             summary = text.replace("\n", " ").strip()[:80]
             _update_task(taskId, status="succeeded", result=text,
-                         spokenSummary=text, summary=summary)
-            print(f"[任务] {taskId} → succeeded，结果({len(text)}字): {summary}",
+                         spokenSummary=short, summary=summary)
+            print(f"[任务] {taskId} → succeeded，播报({len(short)}字): {short}",
                   file=_sys.stderr, flush=True)
-            await _announce(ws, session, "succeeded", text)
+            await _announce(ws, session, "succeeded", short)
             print(f"[任务] {taskId} 完成通知已投递", file=_sys.stderr, flush=True)
         except asyncio.CancelledError:
             _update_task(taskId, status="cancelled", error="任务被取消或会话已结束")

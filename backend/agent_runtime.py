@@ -301,6 +301,7 @@ async def run_agent_loop(
     memory_fs=None,
     timeout: float | None = None,
     temperature: float | None = None,
+    tools_override: list | None = None,
 ):
     """执行一次完整 run（多 sub_turn 原生 function calling）。
 
@@ -320,13 +321,15 @@ async def run_agent_loop(
         config: 可选 ModeAgentConfig 覆盖（默认按 mode 查 get_mode_config，测试/特殊场景用）
         memory_fs: 可选 MemoryFs 实例；压缩提交后异步持久化每日日志/对话/MEMORY.md
                    （design 2.5，异步不阻塞主流程）
+        tools_override: 可选工具集覆盖（默认 build_tools_list(mode)；
+                        后台 Worker 用于剔除 bash 等不适合后台执行的工具）
 
     yield 事件见模块 docstring。
     """
     config = config or get_mode_config(mode)
     run_id = run_id or _new_run_id()
     compaction_state = compaction_state or CompactionState()
-    tools = build_tools_list(mode)
+    tools = tools_override if tools_override is not None else build_tools_list(mode)
     sub_turn = 1
     over_limit = False
     transcript = session.transcript()
