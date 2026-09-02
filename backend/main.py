@@ -313,6 +313,8 @@ async def _memory_summarizer(messages):
     resp = await llm.client.chat.completions.create(
         model=llm.model, messages=messages, temperature=0.3, max_tokens=1200, stream=False,
     )
+    if not getattr(resp, "choices", None):
+        return ""
     return resp.choices[0].message.content or ""
 
 
@@ -477,6 +479,7 @@ class ConversationSession:
         self.frames_since_speech = 0  # 西西说话后的静默保护计数（从0递增）
         self.is_user_speaking = False  # 当前是否已确认用户正在说话
         self.mode = None  # 会话级模式（F4 隔离：None=跟随全局默认；语音 set_mode 只改本会话）
+        self.temperature = None  # 温度覆盖（评测中心 Step4 注入；None = 后端默认 0.7）
         self.last_audio_recv_ts = 0.0  # 最近一次收到前端音频的时间戳（用于收音超时“仍在说话则续期”）
         self.speech_timeout_grace = 0  # 收音超时续期次数（避免无限续）
         self.is_barge_in_speaking = False  # 打断场景：是否已确认用户在插话
@@ -1612,14 +1615,19 @@ async def _safe_send_timing(ws, current, avg, count, avg_count=0):
 
 
 async def handle_user_speech(ws: WebSocket, session: ConversationSession, text: str,
-                             extra_context: str | None = None):
+                             extra_context: str | None = None,
+                             temperature: float | None = None):
     """用户说完一句话：进入思考 → LLM 流式逐句 → TTS 逐句合成播放
 
     extra_context: 可选系统上下文（模式切换状态），一并送入 LLM 生成第一轮回复。
+    temperature:   可选温度覆盖（评测中心 Step4 注入；None = 后端默认 0.7）
     """
     import time
 
     session.state = "thinking"
+    # 评测中心注入的温度 → 持久化到 session，供 run_agent_loop 读取
+    if temperature is not None:
+        session.temperature = temperature
     t0 = time.time()
     # 契约：进入 thinking（LLM 生成）→ 发布状态通知
     await _sync_backend_state(ws, session, "llm_generating")
@@ -1732,8 +1740,13 @@ async def handle_user_speech(ws: WebSocket, session: ConversationSession, text: 
             max_tokens=budget,
             stream=False,
         )
+        if not getattr(resp, "choices", None):
+            return ""
         return resp.choices[0].message.content or ""
 
+    # 后台任务（改造计划最小闭环）：设置当前会话钩子，供 delegate_task 工具读取
+    from task_service import TaskContext
+    TaskContext.set_current(ws, session)
     try:
         # 新架构：原生 function calling 多 sub_turn agent 环（会话层/上下文层/压缩/工具并发都在环内）
         async for ev in run_agent_loop(
@@ -1745,6 +1758,7 @@ async def handle_user_speech(ws: WebSocket, session: ConversationSession, text: 
             on_tool=_on_tool,
             memory_fs=memory_fs,
             timeout=getattr(llm, 'timeout', None),
+            temperature=getattr(session, 'temperature', None),   # 评测中心可注入（默认 None = 0.7）
         ):
             # 被打断：停止后续句子的生成和播放
             if session.abort_speaking:
@@ -1855,6 +1869,8 @@ async def handle_user_speech(ws: WebSocket, session: ConversationSession, text: 
         # 任何退出路径都确保当前句 TTS 任务被清理
         if session.tts_task and not session.tts_task.done():
             session.tts_task.cancel()
+        from task_service import TaskContext
+        TaskContext.clear_current()  # 主 turn 结束，清除后台任务会话钩子
 
     # ── 空回复兜底：LLM 整轮未产出任何回复句（空流/截断/只调工具未生成文本）→
     #    补一条可见话术，避免后端一直 speaking、前端静默无回复 ──
@@ -2183,6 +2199,35 @@ async def handle_control_message(ws: WebSocket, session: ConversationSession, te
         })
 
 
+# ── 后台任务完成语音通知（改造计划最小闭环）────────────────────
+# 由 task_service._announce 回调（创建任务时快照的 ws/session）。
+_ANNOUNCE_RETRY_TIMES = 15       # 最多等 15×2s=30s
+_ANNOUNCE_RETRY_WAIT_S = 2.0
+
+
+async def _announce_task_done(ws, session, status: str, text: str):
+    """任务完成/失败语音通知：不抢播——当前正在播报/生成/收话时不打扰，
+    等当前 turn 安全回到 listening 再播；连接断开或超时则静默放弃。"""
+    import sys as _sys
+    if status == "succeeded":
+        message = f"任务完成。{text}"
+    elif status == "failed":
+        message = "有个后台任务失败了，抱歉哦，你可以让我重新做一次。"
+    else:
+        return  # cancelled：静默
+    print(f"[任务][通知] 等待安全播报时机（status={status}）…", file=_sys.stderr, flush=True)
+    for _ in range(_ANNOUNCE_RETRY_TIMES):
+        try:
+            if session.state == "listening" and not session.is_user_speaking:
+                print(f"[任务][通知] 播报: {message[:60]}", file=_sys.stderr, flush=True)
+                await tts.speak_and_send(ws, message, session.session_id, {"emotion": "平静"})
+                return
+        except Exception:
+            return  # WebSocket 已断开等：放弃播报
+        await asyncio.sleep(_ANNOUNCE_RETRY_WAIT_S)
+    print(f"[任务][通知] 等待超时，放弃播报（不影响任务结果）", file=_sys.stderr, flush=True)
+
+
 async def cleanup_session(session: ConversationSession):
     """连接断开时清理：取消任务、复位状态机超时、清理 ASR。"""
     if session.tts_task and not session.tts_task.done():
@@ -2195,6 +2240,13 @@ async def cleanup_session(session: ConversationSession):
     except Exception:
         pass
     asr.reset(session.session_id)
+
+    # 后台任务（改造计划最小闭环）：销毁会话级 Worker，取消活动任务并保留记录
+    try:
+        from task_service import _svc
+        _svc().teardown_session(session.session_id)
+    except Exception as e:
+        print(f"[task] 会话清理异常: {e}")
 
     # 改造清单#4：会话断开清理挂起上下文
     session.suspended_reply = None

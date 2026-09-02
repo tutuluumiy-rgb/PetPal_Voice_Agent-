@@ -65,3 +65,7 @@ backend/tests/_full_link_out.txt
 
 # ── 独立评测中心项目（自带 node_modules，单独仓库管理）──
 eval-center/
+
+# ── 一次性音频重命名/移位脚本（根目录临时产物）──
+/fix_shift.ps1
+/rename_*.ps1

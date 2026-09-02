@@ -58,6 +58,7 @@ class AliyunASR(ASRProvider):
             "done": threading.Event(),
             "final_text": {},
             "ws": None,
+            "audio_bytes": 0,  # 诊断：累计成功 append 的字节数（排查 "no audio stream"）
         }
         self._sessions[session_id] = sess
         t = threading.Thread(target=self._run_ws, args=(session_id, sess), daemon=True)
@@ -65,6 +66,8 @@ class AliyunASR(ASRProvider):
 
     def feed(self, session_id: str, pcm: bytes):
         """喂入音频（实时入队，后台线程发送给云端）"""
+        if not pcm:
+            return  # 空帧不入队（避免向服务端 append 空音频 → "invalid audio"）
         sess = self._sessions.get(session_id)
         if sess:
             try:
@@ -77,6 +80,16 @@ class AliyunASR(ASRProvider):
         sess = self._sessions.pop(session_id, None)
         if sess is None:
             return ""
+        # 诊断/防护：没有任何 append 成功发出 → 服务端 commit 必报
+        # "Error committing input audio buffer, maybe no invalid audio stream"，无谓报错。
+        if sess["audio_bytes"] <= 0:
+            print(f"[ASR] {session_id} 无任何有效音频帧(append=0)，跳过 commit 直接返回空", file=__import__("sys").stderr)
+            try:
+                sess["queue"].put(("close", None))
+            except Exception:
+                pass
+            return ""
+        print(f"[ASR] {session_id} finalize：累计 append {sess['audio_bytes']} 字节", file=__import__("sys").stderr)
         sess["queue"].put(("commit", None))
 
         import asyncio
@@ -193,6 +206,7 @@ class AliyunASR(ASRProvider):
                         "audio": encoded,
                     }
                     ws.send(json.dumps(evt))
+                    sess["audio_bytes"] += len(payload)  # 诊断：成功发送的累计字节
                 except Exception as e:
                     print(f"[ASR] 发送失败: {e}")
                     break

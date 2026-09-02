@@ -57,6 +57,21 @@ def _tools_for_mode(mode: str) -> set | None:
     return WORK_MODE_TOOLS  # work 或未知 → 全开
 
 
+# ── 后台任务 executor（voice-continuable-agent-refactor-plan 最小闭环）──
+# 延迟 import task_service：loader 被 agent_runtime → task_service → agent_runtime 链路引用，
+# 顶层 import 会造成循环，故在工具执行时才加载。
+
+
+def _delegate_task_executor(goal, detail=None, output_format=None):
+    from task_service import delegate_task
+    return delegate_task(goal, detail=detail, output_format=output_format)
+
+
+def _get_task_status_executor(task_id):
+    from task_service import get_task_status
+    return get_task_status(task_id)
+
+
 # ── 声明式工具映射表 ─────────────────────────────────────────
 # 每个工具：OpenAI function calling schema（type/name/description/parameters）+ executor（执行函数）
 # executor 可能是同步（返回 str/ToolOutput）或 async（返回 str），execute_tool 统一处理
@@ -65,7 +80,7 @@ TOOL_DEFINITIONS = {
         "type": "function",
         "function": {
             "name": "get_weather",
-            "description": "查询城市天气，支持今天/明天/后天。用户问天气时使用。",
+            "description": "查询城市天气，支持今天/明天/后天。当用户询问当前/实时天气、温度、是否下雨等时，必须调用本工具获取真实数据，不得凭常识猜测或编造",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -118,6 +133,44 @@ TOOL_DEFINITIONS = {
         "type": "function",
         "function": MEMORY_FORGET_TOOL["function"],
         "executor": memory_forget,
+    },
+    # ── 后台任务委派（voice-continuable-agent-refactor-plan 最小闭环）──
+    # 只在工作模式可见（WORK_MODE_TOOLS=None 全量）；闲聊白名单不含此处。
+    "delegate_task": {
+        "type": "function",
+        "function": {
+            "name": "delegate_task",
+            "description": "把耗时任务交给后台 Worker 异步执行，并立即返回任务编号，不阻塞当前对话。"
+                           "适合需要多步工具、长时间运行的任务（查资料汇总、批量处理等）。"
+                           "执行完成后会自动播报结果；用户中途可问 get_task_status。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "goal": {"type": "string",
+                             "description": "任务目标（一句话说清要做什么）"},
+                    "detail": {"type": "string", "description": "可选补充说明（背景、约束、数据源等）"},
+                    "output_format": {"type": "string",
+                                      "description": "可选输出要求（结果的格式/播报方式）"},
+                },
+                "required": ["goal"],
+            },
+        },
+        "executor": _delegate_task_executor,
+    },
+    "get_task_status": {
+        "type": "function",
+        "function": {
+            "name": "get_task_status",
+            "description": "查询后台任务（delegate_task 创建）的当前状态、进度或结果。返回任务状态文本。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "delegate_task 返回的任务编号"},
+                },
+                "required": ["task_id"],
+            },
+        },
+        "executor": _get_task_status_executor,
     },
 }
 
