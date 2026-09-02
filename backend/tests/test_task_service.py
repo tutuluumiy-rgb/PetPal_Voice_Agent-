@@ -13,10 +13,16 @@
 import asyncio
 import os
 import sys
+import tempfile
 import types
 import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# 测试任务库隔离：写入系统临时目录，避免每次跑测试污染后端 data/tasks.db
+import task_service as ts_mod  # noqa: E402
+ts_mod.DB_PATH = os.path.join(tempfile.gettempdir(), f"tasks-test-{uuid.uuid4().hex[:8]}.db")
+ts_mod._conn = None  # 若已被开过则按新路径重开
 
 import main as main_mod  # noqa: E402
 from task_service import (  # noqa: E402

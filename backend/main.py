@@ -660,13 +660,14 @@ async def audio_ws(ws: WebSocket):
     await _sync_backend_state(ws, session, "connected")
 
     try:
-        session.last_msg_ts = time.time()
+        import time as _t  # 会话长挂起钳底时间戳
+        session.last_msg_ts = _t.time()
 
         async def _idle_watchdog():
             """会话长挂起钳底：SESSION_HANGUP_IDLE_S 无任何消息 → 结束会话。"""
             while True:
                 await asyncio.sleep(30)  # 每 30s 检查一次
-                idle = time.time() - getattr(session, "last_msg_ts", 0.0)
+                idle = _t.time() - getattr(session, "last_msg_ts", 0.0)
                 if idle >= SESSION_HANGUP_IDLE_S:
                     print(f"[session {session.session_id}] 长挂起钳底（{idle:.0f}s 无消息），结束会话")
                     try:
@@ -678,7 +679,7 @@ async def audio_ws(ws: WebSocket):
         session._hangup_task = asyncio.create_task(_idle_watchdog())
         while True:
             msg = await ws.receive()
-            session.last_msg_ts = time.time()  # 有消息即刷新钳底
+            session.last_msg_ts = _t.time()  # 有消息即刷新钳底
             # 二进制 = 音频帧
             if msg.get("bytes"):
                 await handle_audio_frame(ws, session, msg["bytes"])
