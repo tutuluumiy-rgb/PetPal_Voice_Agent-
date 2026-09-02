@@ -95,6 +95,8 @@ export class VoicePipeline {
   onUserText?: (text: string) => void
   /** 后端 reply/reply_append 文本 */
   onReply?: (text: string, append: boolean) => void
+  /** 后端旁注文本（进度播报/任务通知等播放内容）；供消息区展示 */
+  onAuxText?: (text: string) => void
   onState?: (state: 'idle' | 'listening' | 'speaking') => void
   onTtsEvent?: (kind: 'start' | 'end') => void
   /** 命中退出语（拜拜/再见…）回到待机/聆听时的回调（供 UI 提示） */
@@ -627,6 +629,11 @@ export class VoicePipeline {
         this.onReply?.(msg.text ?? '', true)
         this._armIdleTimer()
         break
+      case 'context_text': {
+        // 后端播报的旁注内容（工具进度/后台任务通知）→ 消息区展示
+        this.onAuxText?.(msg.text ?? '')
+        break
+      }
       case 'tts_start':
         // ⚠️ 修复「两句抢话」：多句回复的每一句都会触发 tts_start，若上一句还在播放
         // 就无条件 resetPlayback()，会把上一句剩余音频掐掉、第二句立刻响起（重叠/抢话）。

@@ -21,6 +21,8 @@ import { VoicePipeline } from '../../app/voice/VoicePipeline'
 interface ChatMessage {
   role: 'user' | 'pet'
   text: string
+  /** 旁注（工具进度/任务通知等播放内容）：展示弱化样式 */
+  aux?: boolean
 }
 
 const messages = ref<ChatMessage[]>([])
@@ -34,8 +36,8 @@ watch(
   },
 )
 
-function pushMessage(role: ChatMessage['role'], text: string): void {
-  messages.value = [...messages.value, { role, text }]
+function pushMessage(role: ChatMessage['role'], text: string, aux = false): void {
+  messages.value = [...messages.value, { role, text, aux }]
 }
 
 // ---------- 语音接入（8001 /ws/audio + 唤醒词待机） ----------
@@ -121,6 +123,11 @@ async function setMicState(on: boolean, wake = false): Promise<void> {
               ? `${barFirstRound}…${barRoundText}`
               : barAllText
           window.api.pushVoicePreview(barText)
+        }
+        // 后端旁注文本（工具进度/任务通知等播放内容）→ 消息区展示（弱化样式）
+        voice.onAuxText = (text) => {
+          if (!text) return
+          pushMessage('pet', text, true)
         }
         voice.onExit = () => {
           const kw = wakeKeyword || '唤醒词'
@@ -471,7 +478,8 @@ onBeforeUnmount(() => {
             <span class="font-medium text-fg-primary">你：</span><span class="text-fg-secondary">{{ m.text }}</span>
           </template>
           <template v-else>
-            <span class="font-medium text-accent">西西：</span><span class="text-fg-secondary">{{ m.text }}</span>
+            <span class="font-medium" :class="m.aux ? 'text-fg-muted' : 'text-accent'">{{ m.aux ? '旁注：' : '西西：' }}</span>
+            <span :class="m.aux ? 'text-fg-muted italic' : 'text-fg-secondary'">{{ m.text }}</span>
           </template>
         </div>
       </div>

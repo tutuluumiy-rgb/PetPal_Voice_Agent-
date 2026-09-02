@@ -1707,6 +1707,11 @@ async def handle_user_speech(ws: WebSocket, session: ConversationSession, text: 
             # 罐头进度不再播，避免前言+进度双播；未播过前言（full_reply 仍空）才播罐头进度。
             if progress_text and not progress_announced and not full_reply:
                 progress_announced = True
+                # 消息区展示与播报同步：播报的进度文本也进前端上下文面板
+                try:
+                    await ws.send_json({"type": "context_text", "text": progress_text})
+                except Exception:
+                    pass
                 progress_task = asyncio.create_task(
                     tts.speak_and_send(ws, progress_text, session.session_id, {"emotion": "平静"})
                 )
@@ -2226,6 +2231,11 @@ async def _announce_task_done(ws, session, status: str, text: str):
             tts_busy = tt is not None and not tt.done()
             if session.state == "listening" and not session.is_user_speaking and not tts_busy:
                 print(f"[任务][通知] 播报: {message[:60]}", file=_sys.stderr, flush=True)
+                # 消息区展示与播报同步：任务通知也进前端上下文面板
+                try:
+                    await ws.send_json({"type": "context_text", "text": message})
+                except Exception:
+                    pass
                 await tts.speak_and_send(ws, message, session.session_id, {"emotion": "平静"})
                 return
         except Exception:
