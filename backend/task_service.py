@@ -54,6 +54,23 @@ async def _send_ctx(ws, text: str):
         pass
 
 
+import re as _re
+
+# 结果里出现这些信号 → 任务未真正完成（不标 succeeded）
+_FAIL_SIGNALS = _re.compile(
+    r"(错误|失败|无法|不能|不可用|被拒|拒绝|不在工作区|超出工作区|白名单|权限不足|无权限|未找到)"
+)
+
+
+def _looks_failed(text: str) -> bool:
+    """判断 Worker 最终结果是否暗示任务未真正完成。
+
+    先剥掉"没有错误/未失败"这类否定语境，再查信号词，降低误判。
+    """
+    t = _re.sub(r"(没有|无|未|不)[^\s，。；,.!?]{0,4}(错误|失败|异常)", "", text or "")
+    return bool(_FAIL_SIGNALS.search(t))
+
+
 async def _short_summary(goal: str, result: str, client=None, model=None) -> str:
     """把后台任务的完整结果压缩成一句 ≤40 字的播报句（LLM 加工；失败回退截断）。
 
@@ -200,8 +217,12 @@ class SessionWorker:
         return self.current_task_id is not None
 
     async def run_task(self, taskId: str, goal: str, detail: str | None,
-                       output_format: str | None, client, model, timeout: float = None) -> str:
-        """在 worker 会话内执行任务，返回最终文本（会由调用方写入任务结果）。"""
+                       output_format: str | None, client, model, timeout: float = None) -> tuple[str, bool]:
+        """在 worker 会话内执行任务。
+
+        返回 (最终文本, had_error)：had_error=True 表示执行中出现过工具错误
+        （供完成判定：真正完成才标 succeeded）。
+        """
         import sys as _sys
         from prompt_loader import build_system_prompt
         from agent_runtime import run_agent_loop
@@ -217,8 +238,10 @@ class SessionWorker:
         user += "\n请执行任务并直接输出最终结果（简洁中文，供语音播报）。"
 
         import time as _time
+        had_error = False
 
         async def _worker_on_tool(stage: str, name: str, call_id: str, text=None):
+            nonlocal had_error
             if stage == "start":
                 print(f"[任务][Worker][工具] >>> 开始 {name}  # call_id={call_id}  "
                       f"t={_time.strftime('%H:%M:%S')}", file=_sys.stderr, flush=True)
@@ -227,6 +250,8 @@ class SessionWorker:
                 print(f"[任务][Worker][工具] <<< 结束 {name}  # call_id={call_id}",
                       file=_sys.stderr, flush=True)
                 print(f"[任务][Worker][工具]     结果: {res}", file=_sys.stderr, flush=True)
+                if res.startswith("错误") or "错误：" in res[:10]:
+                    had_error = True
 
         # ⚠️ 任务内容必须写入 Worker 自己的会话存档：run_agent_loop 不接收外部
         # messages，而是从 session.transcript() 重建上下文（build_model_context）。
@@ -249,8 +274,9 @@ class SessionWorker:
                 pass  # 工具调用已由 on_tool 打印
         final = "".join(parts).strip() or "（任务执行完毕，未产生文本结果）"
         print(f"[任务][Worker] run done  task={taskId} sub_turns={sub_turn_seen} "
-              f"结果({len(final)}字): {final[:60]}", file=_sys.stderr, flush=True)
-        return final
+              f"had_error={had_error} 结果({len(final)}字): {final[:60]}",
+              file=_sys.stderr, flush=True)
+        return final, had_error
 
 
 # ── TaskService ────────────────────────────────────
@@ -306,24 +332,30 @@ class TaskService:
             _update_task(taskId, status="running")
             print(f"[任务] {taskId} → running（Worker 后台执行中）",
                   file=_sys.stderr, flush=True)
-            await _send_ctx(ws, "任务状态：已在后台开始处理，完成后我会告诉你结果。")
+            await _send_ctx(ws, "已在后台开始处理，完成后我会告诉你结果。")
             # Worker 固定按工作模式选模型（默认 DeepSeek）；测试可替换 main.worker_llm
             _worker_llm = getattr(_main, "worker_llm", None) or get_llm_for_mode("work")
             client = _worker_llm.client
             model = _worker_llm.model
             timeout = getattr(_worker_llm, "timeout", None)
-            text = await asyncio.wait_for(
+            text, had_error = await asyncio.wait_for(
                 worker.run_task(taskId, goal, detail, output_format, client, model, timeout),
                 timeout=TASK_TIMEOUT_S,
             )
-            # 结果压缩成一句播报（完整结果仍存 tasks.result 全文）
             short = await _short_summary(goal, text, client, model)
-            summary = text.replace("\n", " ").strip()[:80]
-            _update_task(taskId, status="succeeded", result=text,
-                         spokenSummary=short, summary=summary)
-            print(f"[任务] {taskId} → succeeded，播报({len(short)}字): {short}",
-                  file=_sys.stderr, flush=True)
-            await _announce(ws, session, "succeeded", short)
+            if had_error or _looks_failed(text):
+                # 未真正完成（工具出错/目标不可达等）：标 failed，不播"已完成"
+                _update_task(taskId, status="failed", error=short, result=text)
+                print(f"[任务] {taskId} → failed（真正完成判定未通过）: {short}",
+                      file=_sys.stderr, flush=True)
+                await _announce(ws, session, "failed", short)
+            else:
+                summary = text.replace("\n", " ").strip()[:80]
+                _update_task(taskId, status="succeeded", result=text,
+                             spokenSummary=short, summary=summary)
+                print(f"[任务] {taskId} → succeeded，播报({len(short)}字): {short}",
+                      file=_sys.stderr, flush=True)
+                await _announce(ws, session, "succeeded", short)
             print(f"[任务] {taskId} 完成通知已投递", file=_sys.stderr, flush=True)
         except asyncio.CancelledError:
             _update_task(taskId, status="cancelled", error="任务被取消或会话已结束")

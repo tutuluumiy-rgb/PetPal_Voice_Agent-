@@ -159,13 +159,14 @@ async def t_a_delegate_complete():
         st = await get_task_status(task_id)
         check("get_task_status 可读", "succeeded" in st and "四十二" in st)
 
-        # 通知：listening → 立即播报（结果已压缩成一句，前缀"任务状态："）
+        # 通知：listening → 立即播报（结果已压缩成一句，无固定前缀）
         await asyncio.sleep(0.05)
-        check("完成语音通知已播报", any("任务状态：已完成" in s for s in tts.spoken),
+        check("完成语音通知已播报",
+              any("四十二" in s for s in tts.spoken),
               tts.spoken[-1][:30] if tts.spoken else "")
         ctx_sent = [d for d in ws.sent if d.get("type") == "context_text"]
-        check("状态旁注已发（任务状态：…）",
-              any("任务状态" in str(d.get("text", "")) for d in ctx_sent),
+        check("状态旁注已发（后台处理提示）",
+              any("已在后台开始处理" in str(d.get("text", "")) for d in ctx_sent),
               str(ctx_sent[0])[:50] if ctx_sent else "无")
     finally:
         TaskContext.clear_current()

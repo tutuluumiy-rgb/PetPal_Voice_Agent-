@@ -57,6 +57,30 @@ def is_path_allowed(candidate: Path) -> bool:
             continue
     return False
 
+
+# ── 运行时动态管理（set_workspace 工具调用，无需重启）──────
+
+
+def _coerce_root(path: str) -> Path:
+    if not isinstance(path, str) or not path.strip():
+        raise ValueError("path 不能为空")
+    return Path(path.strip()).expanduser().resolve()
+
+
+def add_workspace_root(path: str) -> str:
+    """把目录加入白名单（立即生效）。返回当前白名单文本。"""
+    p = _coerce_root(path)
+    if p not in _WORKSPACE_ALLOWLIST:
+        _WORKSPACE_ALLOWLIST.append(p)
+    return "已添加工作区：" + str(p) + "。当前白名单：" + "；".join(str(r) for r in workspace_allowed_roots())
+
+
+def remove_workspace_root(path: str) -> str:
+    """把目录移出白名单（不影响项目工作区本身）。返回当前白名单文本。"""
+    p = _coerce_root(path)
+    _WORKSPACE_ALLOWLIST[:] = [r for r in _WORKSPACE_ALLOWLIST if r != p]
+    return "已移除：" + str(p) + "。当前白名单：" + "；".join(str(r) for r in workspace_allowed_roots())
+
 # ── 工作区权限状态（可手动切换）──────────────────────────────
 _WORKSPACE_RESTRICTED = True
 

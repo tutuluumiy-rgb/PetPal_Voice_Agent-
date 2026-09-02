@@ -2218,9 +2218,9 @@ async def _announce_task_done(ws, session, status: str, text: str):
     等当前 turn 安全回到 listening 再播；连接断开或超时则静默放弃。"""
     import sys as _sys
     if status == "succeeded":
-        message = f"任务状态：已完成——{text}"
+        message = text  # 后台已把结果压缩成一句，直接播（无前缀）
     elif status == "failed":
-        message = "任务状态：失败——抱歉，后台任务没有成功，你可以让我重新做一次。"
+        message = f"后台任务没成功：{text}"
     else:
         return  # cancelled：静默
     print(f"[任务][通知] 等待安全播报时机（status={status}）…", file=_sys.stderr, flush=True)
@@ -2257,12 +2257,11 @@ async def cleanup_session(session: ConversationSession):
         pass
     asr.reset(session.session_id)
 
-    # 后台任务（改造计划最小闭环）：销毁会话级 Worker，取消活动任务并保留记录
-    try:
-        from task_service import _svc
-        _svc().teardown_session(session.session_id)
-    except Exception as e:
-        print(f"[task] 会话清理异常: {e}")
+    # 后台任务（改造计划最小闭环）：⚠️ 不再随 ws 断开销毁 Worker——
+    # 语音连接断开（前端回待机/页面重载/网络瞬断）不等于会话删除，
+    # Worker 生命周期应绑定「会话」而非「连接」；销毁只由显式会话删除/
+    # 空闲回收（计划 §10，后续阶段）触发。task_service.teardown_session 保留 API。
+    # （之前在这里调用 teardown：任务执行中前端空闲超时断开 ws → 任务被误杀）
 
     # 改造清单#4：会话断开清理挂起上下文
     session.suspended_reply = None

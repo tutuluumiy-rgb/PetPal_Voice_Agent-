@@ -72,6 +72,16 @@ def _get_task_status_executor(task_id):
     return get_task_status(task_id)
 
 
+def _set_workspace_executor(action, path):
+    """set_workspace：增/删工作区白名单（用户口头指令即授权，立即生效）。"""
+    from tools._file_utils import add_workspace_root, remove_workspace_root
+    if action == "add":
+        return add_workspace_root(path)
+    if action == "remove":
+        return remove_workspace_root(path)
+    return "action 仅支持 add / remove"
+
+
 # ── 声明式工具映射表 ─────────────────────────────────────────
 # 每个工具：OpenAI function calling schema（type/name/description/parameters）+ executor（执行函数）
 # executor 可能是同步（返回 str/ToolOutput）或 async（返回 str），execute_tool 统一处理
@@ -171,6 +181,31 @@ TOOL_DEFINITIONS = {
             },
         },
         "executor": _get_task_status_executor,
+    },
+    "set_workspace": {
+        "type": "function",
+        "function": {
+            "name": "set_workspace",
+            "description": "管理工作区权限白名单：把要读写的外部目录加入/移出允许列表。"
+                           "当用户明确要求把某个目录作为工作区（如'把 D 盘素材库加进工作区'）"
+                           "或要求移出时调用；用户口头指令即授权，直接执行无需确认，"
+                           "立即生效（后台 Worker 后续任务也能用）。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string", "enum": ["add", "remove"],
+                        "description": "add=加入白名单，remove=移出白名单",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "目录绝对路径（如 D:/素材库、G:/petpal测试）",
+                    },
+                },
+                "required": ["action", "path"],
+            },
+        },
+        "executor": _set_workspace_executor,
     },
 }
 
