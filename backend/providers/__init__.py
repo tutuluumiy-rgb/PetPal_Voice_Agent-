@@ -51,3 +51,31 @@ def get_llm():
 
         return QwenLLM()
     raise RuntimeError(f"未知 LLM_PROVIDER: {provider}（可用: deepseek, qwen）")
+
+
+# ── LLM 按模式选择 ─────────────────────────────────────
+# 工作模式默认 DeepSeek（工具调用更稳，用户确认）；闲聊跟随 LLM_PROVIDER。
+# WORK_MODE_LLM_PROVIDER 可覆盖工作模式的供应商（deepseek|qwen）。
+_llm_mode_cache: dict[str, object] = {}
+
+
+def get_llm_for_mode(mode: str | None = None):
+    """按会话模式返回 LLM 实例（按 provider 缓存，改 .env 后重启生效）：
+      - mode == "work" → WORK_MODE_LLM_PROVIDER（默认 deepseek）
+      - 其他（chat / None）→ LLM_PROVIDER（默认 deepseek，当前 .env 为 qwen）
+    """
+    from . import llm as _llm_mod
+
+    provider = os.getenv("WORK_MODE_LLM_PROVIDER", "deepseek") if mode == "work" \
+        else os.getenv("LLM_PROVIDER", "deepseek")
+    if provider == "deepseek":
+        cls = _llm_mod.DeepSeekLLM
+    elif provider == "qwen":
+        cls = _llm_mod.QwenLLM
+    else:
+        raise RuntimeError(f"未知 LLM provider: {provider}（可用: deepseek, qwen）")
+    inst = _llm_mode_cache.get(provider)
+    if inst is None:
+        inst = cls()
+        _llm_mode_cache[provider] = inst
+    return inst

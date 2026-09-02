@@ -128,6 +128,7 @@ class FakeSession:
 async def t_a_delegate_complete():
     print("== t-a 委派→后台执行→完成→通知 ==")
     main_mod.llm = FakeLLM("我已经完成，结果是四十二。")
+    main_mod.worker_llm = FakeLLM("我已经完成，结果是四十二。")
     tts = FakeTTS()
     main_mod.tts = tts
     ws, sess = FakeWs(), FakeSession()
@@ -161,6 +162,7 @@ async def t_a_delegate_complete():
 async def t_b_worker_reuse():
     print("== t-b 同会话 Worker 复用 ==")
     main_mod.llm = FakeLLM()
+    main_mod.worker_llm = FakeLLM()
     tts = FakeTTS()
     main_mod.tts = tts
     ws, sess = FakeWs(), FakeSession()
@@ -189,11 +191,13 @@ async def t_b_worker_reuse():
 async def t_c_busy_reject():
     print("== t-c 执行中再次委派被拒 ==")
     main_mod.llm = FakeLLM("完成任务A")
+    main_mod.worker_llm = FakeLLM("完成任务A")
 
     async def _hang(**kw):
         return HangingStream()
 
     main_mod.llm.client.chat.completions.create = _hang
+    main_mod.worker_llm.client.chat.completions.create = _hang
 
     ws, sess = FakeWs(), FakeSession()
     sess.session_id = "sess-" + uuid.uuid4().hex[:6]
@@ -218,6 +222,7 @@ async def t_d_status_missing_and_done():
     st = await get_task_status("task-no-such")
     check("不存在任务给出提示", "任务不存在" in st)
     main_mod.llm = FakeLLM("完事了")
+    main_mod.worker_llm = FakeLLM("完事了")
     tts = FakeTTS()
     main_mod.tts = tts
     ws, sess = FakeWs(), FakeSession()
@@ -239,11 +244,13 @@ async def t_d_status_missing_and_done():
 async def t_e_teardown_cancels():
     print("== t-e 会话 teardown 置 cancelled + 迟到结果不覆盖终态 ==")
     main_mod.llm = FakeLLM("慢慢跑")
+    main_mod.worker_llm = FakeLLM("慢慢跑")
 
     async def _hang(**kw):
         return HangingStream(hold_s=0.3)
 
     main_mod.llm.client.chat.completions.create = _hang
+    main_mod.worker_llm.client.chat.completions.create = _hang
     tts = FakeTTS()
     main_mod.tts = tts
     ws, sess = FakeWs(), FakeSession()

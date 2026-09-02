@@ -114,10 +114,15 @@ def setup_patches(text):
     patchers = []
     asr = AuditASR()
     asr.set_text(text)
-    for name, obj in (("asr", asr), ("tts", MockTTS()), ("llm", FakeLLM("[开心]好的～")), ("backend_vad", FakeVAD(True))):
+    _llm = FakeLLM("[开心]好的～")
+    for name, obj in (("asr", asr), ("tts", MockTTS()), ("llm", _llm), ("backend_vad", FakeVAD(True))):
         p = um.patch.object(main_mod, name, obj)
         patchers.append(p)
         p.start()
+    # 按模式选模型（work→deepseek）在审计场景统一指向 FakeLLM
+    p = um.patch.object(main_mod, "get_llm_for_mode", lambda mode=None: _llm)
+    patchers.append(p)
+    p.start()
     return patchers, asr
 
 

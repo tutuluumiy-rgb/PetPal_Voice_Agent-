@@ -20,7 +20,7 @@ from fastapi.responses import JSONResponse
 
 load_dotenv()  # 读取 backend/.env
 
-from providers import get_asr, get_llm, get_tts
+from providers import get_asr, get_llm, get_llm_for_mode, get_tts
 from providers.llm import strip_emotion_tags
 from vad_engine import SileroVAD
 from smart_turn import SmartTurnJudge
@@ -288,6 +288,7 @@ smart_turn.threshold = SMART_TURN_THRESHOLD
 # 通过工厂获取云接口（可插拔：换 ASR/TTS/LLM 只改 .env 的 *_PROVIDER 配置）
 asr = get_asr()
 llm = get_llm()
+worker_llm = get_llm_for_mode("work")  # 后台任务 Worker 固定按工作模式选模型（默认 DeepSeek）
 tts = get_tts()
 # 宠物情绪状态机（跨轮保持情绪，随时间向平静衰减，输出 TTS 数值参数）
 emotion_state = EmotionState()
@@ -1678,6 +1679,8 @@ async def handle_user_speech(ws: WebSocket, session: ConversationSession, text: 
     run_id = _uuid.uuid4().hex[:8]
     mode = mode_state.get_mode()
     system_prompt = build_system_prompt(mode)
+    # 按会话模式选 LLM：工作模式默认 DeepSeek（工具调用更稳）；闲聊跟随 LLM_PROVIDER
+    _llm = get_llm_for_mode(mode)
     if extra_context:
         system_prompt += "\n\n" + extra_context
     session.store.add("user", text, run_id=run_id, sub_turn=1)
@@ -1731,8 +1734,8 @@ async def handle_user_speech(ws: WebSocket, session: ConversationSession, text: 
         # 粗略估算被压缩历史 token（prompt 文本长度 / 4），乘 0.1 作为摘要预算
         hist_tokens = max(1, len(prompt_text) // 4)
         budget = max(200, min(2000, int(hist_tokens * COMPACT_SUMMARY_RATIO)))
-        resp = await llm.client.chat.completions.create(
-            model=llm.model,
+        resp = await _llm.client.chat.completions.create(
+            model=_llm.model,
             messages=[
                 {"role": "system", "content": COMPACTION_SYSTEM_PROMPT},
                 {"role": "user", "content": prompt_text},
@@ -1750,14 +1753,14 @@ async def handle_user_speech(ws: WebSocket, session: ConversationSession, text: 
     try:
         # 新架构：原生 function calling 多 sub_turn agent 环（会话层/上下文层/压缩/工具并发都在环内）
         async for ev in run_agent_loop(
-            llm.client, llm.model, mode, system_prompt, session.store,
+            _llm.client, _llm.model, mode, system_prompt, session.store,
             run_id=run_id,
             user_profile=load_user_profile(get_active_user_id()),
             compaction_state=session.agent_compaction,
             summarizer=_summarize,
             on_tool=_on_tool,
             memory_fs=memory_fs,
-            timeout=getattr(llm, 'timeout', None),
+            timeout=getattr(_llm, 'timeout', None),
             temperature=getattr(session, 'temperature', None),   # 评测中心可注入（默认 None = 0.7）
         ):
             # 被打断：停止后续句子的生成和播放
@@ -1892,7 +1895,7 @@ async def handle_user_speech(ws: WebSocket, session: ConversationSession, text: 
 
     await session.emit_event(
         ws, "LLM",
-        f"首字 {getattr(llm, 'first_token_time', 0)}s，首句 {round(t_llm_first_sentence or 0,2)}s，完成 {round(t_llm,2)}s，情绪[{emotion}]",
+        f"首字 {getattr(_llm, 'first_token_time', 0)}s，首句 {round(t_llm_first_sentence or 0,2)}s，完成 {round(t_llm,2)}s，情绪[{emotion}]",
         duration=round(t_llm, 2),
     )
 

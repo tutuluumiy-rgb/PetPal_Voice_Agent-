@@ -220,6 +220,10 @@ def setup_patches(final_text: str, reply_text: str = "[开心]好的，这就帮
         p = um.patch.object(main_mod, name, obj)
         patchers.append(p)
         p.start()
+    # 按模式选模型（改造：work→deepseek）在测试里统一指向 FakeLLM
+    p = um.patch.object(main_mod, "get_llm_for_mode", lambda mode=None: llm)
+    patchers.append(p)
+    p.start()
     return patchers, {"asr": asr, "tts": tts, "llm": llm, "vad": vad}
 
 

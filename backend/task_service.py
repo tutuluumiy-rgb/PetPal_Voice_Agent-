@@ -251,13 +251,16 @@ class TaskService:
                               ws, session):
         import sys as _sys
         import main as _main
+        from providers import get_llm_for_mode
         try:
             _update_task(taskId, status="running")
             print(f"[任务] {taskId} → running（Worker 后台执行中）",
                   file=_sys.stderr, flush=True)
-            client = _main.llm.client
-            model = _main.llm.model
-            timeout = getattr(_main.llm, "timeout", None)
+            # Worker 固定按工作模式选模型（默认 DeepSeek）；测试可替换 main.worker_llm
+            _worker_llm = getattr(_main, "worker_llm", None) or get_llm_for_mode("work")
+            client = _worker_llm.client
+            model = _worker_llm.model
+            timeout = getattr(_worker_llm, "timeout", None)
             text = await asyncio.wait_for(
                 worker.run_task(taskId, goal, detail, output_format, client, model, timeout),
                 timeout=TASK_TIMEOUT_S,
