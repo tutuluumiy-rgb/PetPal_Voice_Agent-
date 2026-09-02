@@ -16,11 +16,46 @@ import difflib
 import tempfile
 from pathlib import Path
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()  # 读取 backend/.env（WORKSPACE_ALLOWLIST 等）
+except Exception:
+    pass
+
 # ── 工作区根：本项目根目录（backend 的上一级）────────────────
 _WORKSPACE_ROOT = Path(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 ).resolve()
 WORKSPACE_ROOT = _WORKSPACE_ROOT
+
+# ── 额外工作区白名单（WORKSPACE_ALLOWLIST，; 分隔多个目录）────
+# 默认空 = 行为不变（仅项目工作区）。手动指定如：
+#   WORKSPACE_ALLOWLIST=G:\petpal测试
+# Worker/工具（read/write/edit/bash 路径解析）在这些目录内同样放行。
+_WORKSPACE_ALLOWLIST: list[Path] = []
+for _raw in os.getenv("WORKSPACE_ALLOWLIST", "").split(os.pathsep):
+    _raw = _raw.strip()
+    if _raw:
+        try:
+            _WORKSPACE_ALLOWLIST.append(Path(_raw).expanduser().resolve())
+        except Exception:
+            pass
+
+
+def workspace_allowed_roots() -> list[Path]:
+    """返回允许的全部根目录（项目工作区 + 白名单）。"""
+    return [WORKSPACE_ROOT, *_WORKSPACE_ALLOWLIST]
+
+
+def is_path_allowed(candidate: Path) -> bool:
+    """candidate 是否落在项目工作区或任一白名单目录内。"""
+    for root in workspace_allowed_roots():
+        try:
+            candidate.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
 
 # ── 工作区权限状态（可手动切换）──────────────────────────────
 _WORKSPACE_RESTRICTED = True
@@ -61,11 +96,10 @@ def resolve_workspace_path(path: str) -> Path:
         candidate = p.resolve()
 
     if _WORKSPACE_RESTRICTED:
-        try:
-            candidate.relative_to(WORKSPACE_ROOT)
-        except ValueError:
+        if not is_path_allowed(candidate):
             raise ValueError(
-                f"路径超出工作区（工作区锁定中）：{path}（工作区={WORKSPACE_ROOT}）"
+                f"路径超出工作区白名单（工作区锁定中）：{path}"
+                f"（允许：{WORKSPACE_ROOT}；额外白名单：{_WORKSPACE_ALLOWLIST}）"
             )
     return candidate
 
