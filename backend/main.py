@@ -1085,10 +1085,12 @@ async def finish_user_speech(ws: WebSocket, session: ConversationSession):
     matched, target = parse_mode_command(text)
     switch_ctx = None
     if matched:
-        # F4 隔离：语音切换只改【本会话】模式（不再写全局单例，防跨会话影响）
+        # 模式持久化（用户确认"唤醒后保持上一次模式"）：语音切换【同时写会话与全局】，
+        # 断开重连（回待机后再唤醒）新会话继承最后模式，宠物动画/工具/面板保持一致。
         new_mode = target if target else "work"
+        mode_state.switch(new_mode)
         session.mode = new_mode
-        print(f"[模式] 语音指令切换(会话级) → {new_mode}")
+        print(f"[模式] 语音指令切换(会话+全局持久) → {new_mode}")
         await session.emit_event(ws, "模式", f"系统通知：已经切换到{'工作模式' if new_mode == 'work' else '闲聊模式'}")
         await ws.send_json({
             "type": "mode_changed",
@@ -2012,7 +2014,7 @@ async def handle_control_message(ws: WebSocket, session: ConversationSession, te
         await session.emit_event(ws, "系统", "已中止当前对话")
     elif msg_type == "set_mode":
         # 手动切换模式：{"type":"set_mode","mode":"chat"|"work"} 或 "toggle"
-        # F4 隔离：只改本会话模式（不再写全局单例）
+        # 模式持久化（与语音指令一致）：同时写会话与全局，断开重连后继承。
         requested = msg.get("mode")
         base = getattr(session, "mode", None) or mode_state.get_mode()
         if requested == "toggle":
@@ -2021,6 +2023,7 @@ async def handle_control_message(ws: WebSocket, session: ConversationSession, te
             new_mode = requested
         else:
             new_mode = base
+        mode_state.switch(new_mode)
         session.mode = new_mode
         await ws.send_json({"type": "mode_changed", "mode": new_mode})
         print(f"[模式] 手动切换(会话级) → {new_mode}")
