@@ -54,14 +54,16 @@ def t_sec2_user_id_allowlist():
     check("拒绝: 超长", not _safe_uid("x" * 65))
 
 
-def t_sec3_bash_disabled_by_default():
-    print("== t-sec3 bash 默认禁用（ALLOW_BASH 未开）==")
-    from tools.bash import bash
-    try:
-        bash("echo hi")
-        check("bash 默认应拒绝", False, "竟然执行了")
-    except RuntimeError as e:
-        check("bash 默认应拒绝", "禁用" in str(e), f"err={str(e)[:40]}")
+def t_sec3_bash_default_on_closable():
+    print("== t-sec3 bash 默认开启（用户确认），ALLOW_BASH=0 可关闭 ==")
+    import tools.bash as bash_mod
+    check("bash 默认开启", bash_mod.ALLOW_BASH is True)
+    with um.patch.object(bash_mod, "ALLOW_BASH", False):
+        try:
+            bash_mod.bash("echo hi")
+            check("关闭时拒绝执行", False, "竟然执行了")
+        except RuntimeError as e:
+            check("关闭时拒绝执行", "关闭" in str(e) or "ALLOW_BASH" in str(e), f"err={str(e)[:50]}")
 
 
 def t_sec4_loader_approval_wiring():
@@ -71,9 +73,11 @@ def t_sec4_loader_approval_wiring():
     async def run():
         ok_read = await loader.execute_tool("read", {"path": "."}, mode="chat")
         check("read(chat白名单-经审批放行): 可执行", "错误" not in ok_read or "执行失败" in ok_read, ok_read[:40])
-        # bash 被默认禁用 + 工作模式外也不可用
+        # bash 现默认开启（用户确认）：work 模式不应再被白名单/禁用拦截
         denied_work = await loader.execute_tool("bash", {"command": "id"}, mode="work")
-        check("bash(工作模式): 被 ALLOW_BASH 禁用拦截", "禁用" in denied_work, denied_work[:40])
+        check("bash(工作模式): 白名单放行（执行结果取决于本机 bash）",
+              "不可用" not in denied_work and "已关闭" not in denied_work,
+              denied_work[:40])
         denied_chat = await loader.execute_tool("bash", {"command": "id"}, mode="chat")
         check("bash(聊天模式): 白名单拦截", "不可用" in denied_chat, denied_chat[:40])
     asyncio.run(run())
@@ -115,7 +119,7 @@ def t_sec6_middleware_stack_builds():
 def main():
     t_sec1_origin_allowlist()
     t_sec2_user_id_allowlist()
-    t_sec3_bash_disabled_by_default()
+    t_sec3_bash_default_on_closable()
     t_sec4_loader_approval_wiring()
     t_sec5_message_hardening()
     t_sec6_middleware_stack_builds()

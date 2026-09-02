@@ -171,7 +171,9 @@ TOOL_DEFINITIONS = {
         "type": "function",
         "function": {
             "name": "get_task_status",
-            "description": "查询后台任务（delegate_task 创建）的当前状态、进度或结果。返回任务状态文本。",
+            "description": "查询后台任务（delegate_task 创建）的当前状态、进度或结果。"
+                           "【当用户询问后台任务进度/状态/完成情况（如'任务怎么样了/好了吗/进度到哪了/完成没有'）时，"
+                           "必须先调用本工具查询最新状态，再依据返回结果回答，不要凭记忆推测进度】。返回任务状态文本。",
             "parameters": {
                 "type": "object",
                 "properties": {
