@@ -139,6 +139,10 @@ register_mgmt(app)
 # 【采样率】前端录音采样率，前后端保持一致
 SAMPLE_RATE = 16000
 
+# 【会话长挂起钳底】前端空闲待机是"静默挂起"（会话保留不结束）；为防止僵尸连接，
+# 会话超过此秒数无任何消息则后端自动结束（再次唤醒将开启新会话）。默认 2 小时。
+SESSION_HANGUP_IDLE_S = float(os.getenv("SESSION_HANGUP_IDLE_S", "7200"))
+
 # 【说话后静默保护期】西西说完话后多少帧内跳过处理（等混响尾音衰减）
 # 单位：帧，1帧 = 30ms（后端音频分帧）
 # 调大 → 更安全防回声；调小 → 用户接话响应快
@@ -522,6 +526,9 @@ class ConversationSession:
         self.smart_turn_segment = None   # 本次端点判定的整段话 PCM（bytes|None）
         self.smart_turn_tail = None      # soft_ended 窗口期收集的真实尾静音（bytearray|None=未收集）
         self._rejudge_task = None        # 尾静音重判定时任务
+        # ── 长挂起钳底（会话定义）：空闲待机=静默挂起；2h 无消息后端自动结束会话 ──
+        self.last_msg_ts = 0.0           # 最近一次收到前端消息的时刻
+        self._hangup_task = None         # 空闲 watchdog 任务
 
     def reset_episode(self):
         """新一轮对话开始，清空 VAD 状态"""
@@ -653,8 +660,25 @@ async def audio_ws(ws: WebSocket):
     await _sync_backend_state(ws, session, "connected")
 
     try:
+        session.last_msg_ts = time.time()
+
+        async def _idle_watchdog():
+            """会话长挂起钳底：SESSION_HANGUP_IDLE_S 无任何消息 → 结束会话。"""
+            while True:
+                await asyncio.sleep(30)  # 每 30s 检查一次
+                idle = time.time() - getattr(session, "last_msg_ts", 0.0)
+                if idle >= SESSION_HANGUP_IDLE_S:
+                    print(f"[session {session.session_id}] 长挂起钳底（{idle:.0f}s 无消息），结束会话")
+                    try:
+                        await ws.close()
+                    except Exception:
+                        pass
+                    return
+
+        session._hangup_task = asyncio.create_task(_idle_watchdog())
         while True:
             msg = await ws.receive()
+            session.last_msg_ts = time.time()  # 有消息即刷新钳底
             # 二进制 = 音频帧
             if msg.get("bytes"):
                 await handle_audio_frame(ws, session, msg["bytes"])
@@ -2279,6 +2303,14 @@ async def cleanup_session(session: ConversationSession):
     except Exception:
         pass
     asr.reset(session.session_id)
+
+    # 会话长挂起 watchdog 清理
+    if getattr(session, "_hangup_task", None) is not None:
+        try:
+            session._hangup_task.cancel()
+        except Exception:
+            pass
+        session._hangup_task = None
 
     # 后台任务（改造计划最小闭环）：⚠️ 不再随 ws 断开销毁 Worker——
     # 语音连接断开（前端回待机/页面重载/网络瞬断）不等于会话删除，

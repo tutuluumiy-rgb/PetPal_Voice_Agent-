@@ -203,9 +203,16 @@ export class VoicePipeline {
     console.log('[voice] 唤醒命中:', keyword)
     this.onWake?.(keyword)
     // 唤醒后立即让后端预热 TTS WS 长连接（fire-and-forget，不阻塞进对话）
-    // 把首句合成的 5.5s 建连提前到唤醒时间窗内跑完 → 首包 2.7s
-    // 仅 MiniMax WS transport 生效；HTTP/其他 provider 后端会 noop
     this._control({ type: 'tts_preheat' })
+    // 挂起中（空闲超时但连接保留）→ 恢复同一会话，不重连、不新建
+    // （会话定义：空闲待机不算结束会话；只有用户触发退出/新建才真正结束）
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      console.log('[voice] 恢复同一会话（连接仍在，不新建）')
+      this.conversationStarted = true
+      this.onState?.('listening')
+      this._armIdleTimer()
+      return
+    }
     void this._enterConversation()
   }
 
@@ -226,7 +233,18 @@ export class VoicePipeline {
     }
   }
 
-  /** 回到待机（只监听唤醒，切断后端会话） */
+  /** 静默挂起（空闲超时）——保留后端连接与 VAD，回待机态（只监唤醒词）。
+ *  会话不结束：上下文/后台任务延续；再次唤醒若连接仍在 → 恢复同一会话。
+ *  会话只在用户触发结束（口语退出/新建会话/退出应用）或长挂起钳底（后端 2h 无消息）时真正断开。 */
+  private _suspendToWake(): void {
+    this._clearIdleTimer()
+    this.conversationStarted = false
+    this.speechActive = false
+    this.onState?.('idle')
+    console.log('[voice] 空闲挂起（保留连接与会话），说唤醒词可回到同一会话')
+  }
+
+  /** 回到待机（只监听唤醒，切断后端会话）——供【用户触发结束】与失败路径使用 */
   private _backToWake(): void {
     this._clearIdleTimer()
     if (this.vad) { try { this.vad.destroy() } catch { /* ignore */ } this.vad = null }
@@ -245,8 +263,8 @@ export class VoicePipeline {
     if (this.idleTimer) clearTimeout(this.idleTimer)
     this.idleTimer = setTimeout(() => {
       this.idleTimer = null
-      console.log('[voice] 对话空闲超时，回到待机')
-      if (this.wakeWordOn && this.conversationStarted) this._backToWake()
+      console.log('[voice] 对话空闲超时，静默挂起（会话保留）')
+      if (this.wakeWordOn && this.conversationStarted) this._suspendToWake()
     }, this.conversationIdleMs)
   }
 
@@ -447,6 +465,8 @@ export class VoicePipeline {
       // 后端做二次确认（~16ms）：barge_reject 恢复 / barge_confirm 进入静音等待
       frameSamples: 512,  // 对齐后端（512=32ms/帧）：触发更快（6帧≈192ms），帧级判定更细但噪声下更抖
       onSpeechStart: () => {
+        // 待机/挂起态：人声判定交由唤醒词处理，不上报不 ducking（会话未恢复）
+        if (!this.conversationStarted) return
         console.log('[VAD] onSpeechStart（判定为人声 → ducking + 上报）')
         // 0. 记录用户开口时刻（用于算打断延迟：开口 → 停止播报）
         this.speechStartTime = performance.now()
@@ -473,6 +493,8 @@ export class VoicePipeline {
       },
       // ── 用户说完（连续 20 帧静音 = 640ms 判定人声结束；frameSamples=512=32ms/帧）──
       onSpeechEnd: () => {
+        // 待机/挂起态（或未确认对话开始）→ 忽略
+        if (!this.conversationStarted) return
         console.log('[VAD] onSpeechEnd（上报 speech_end）')
         // 记录用户输入完成时刻（用于真实端到端延迟：说完 → 第一帧出声）。
         // 口径（用户确认）：每次 VAD 判定结束都刷新——补充说话/补充窗口场景下，
