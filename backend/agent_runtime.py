@@ -43,6 +43,14 @@ from providers.llm import SENTENCE_ENDS, _EMOTION_RE, strip_emotion_tags
 
 MAX_PARALLEL_TOOL_CALLS = 2
 
+# ── 按模式默认温度（温度越高答复越发散）──
+# work：任务执行/工具调用要稳定准确 → 低温度（默认 0.3）
+# chat：闲聊发散一点更口语自然 → 默认 0.9
+# 评测中心等显式传入 temperature 时优先生效（session.temperature 覆盖）
+import os as _os
+CHAT_MODE_TEMPERATURE = float(_os.getenv("CHAT_MODE_TEMPERATURE", "0.9"))
+WORK_MODE_TEMPERATURE = float(_os.getenv("WORK_MODE_TEMPERATURE", "0.3"))
+
 _LIMIT_HINT = (
     "（系统提示：你已经达到本次允许的最大模型调用轮次，必须停止调用任何工具，"
     "直接用一段话总结当前进展和结论，让对话在此收尾。）"
@@ -155,6 +163,9 @@ async def _stream_final_sentences(stream, t_start):
     emotion = "平静"
     emotion_parsed = False
     async for chunk in stream:
+        # 防御：流式 chunk 可能带空 choices（如 usage-only chunk）
+        if not getattr(chunk, "choices", None):
+            continue
         delta = getattr(chunk.choices[0].delta, "content", None)
         if not delta:
             continue
@@ -289,6 +300,7 @@ async def run_agent_loop(
     memory_store=None,
     memory_fs=None,
     timeout: float | None = None,
+    temperature: float | None = None,
 ):
     """执行一次完整 run（多 sub_turn 原生 function calling）。
 
@@ -397,8 +409,10 @@ async def run_agent_loop(
         # （废弃旧的"决策非流式 + 回复流式"两次请求：它丢掉第一轮正文、且第二次流式
         #   偶发空会静默；现在用工具执行前的『前言』即第一轮回复，天然匹配
         #   「工作模式只要第一轮+最后一轮」的播报约定）
+        mode_temp = WORK_MODE_TEMPERATURE if mode == "work" else CHAT_MODE_TEMPERATURE
         stream = await client.chat.completions.create(
-            model=model, messages=messages, temperature=0.9, max_tokens=15000,
+            model=model, messages=messages,
+            temperature=temperature if temperature is not None else mode_temp, max_tokens=15000,
             tools=effective_tools or None, stream=True,
             timeout=timeout,
         )
@@ -411,6 +425,9 @@ async def run_agent_loop(
         stream_tools: dict[int, dict] = {}
 
         async for chunk in stream:
+            # 防御：流式 chunk 可能带空 choices（如 usage-only / 多模态模型的 reasoning chunk）
+            if not getattr(chunk, "choices", None):
+                continue
             choice = chunk.choices[0]
             delta = choice.delta
             if delta and getattr(delta, "content", None):
