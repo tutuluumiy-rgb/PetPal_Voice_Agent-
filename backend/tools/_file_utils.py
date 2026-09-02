@@ -68,8 +68,12 @@ def _coerce_root(path: str) -> Path:
 
 
 def add_workspace_root(path: str) -> str:
-    """把目录加入白名单（立即生效）。返回当前白名单文本。"""
+    """把目录加入白名单并确保目录存在（不存在则创建，避免后续 write/read 报错）。"""
     p = _coerce_root(path)
+    try:
+        p.mkdir(parents=True, exist_ok=True)  # 目录不存在 → 自动创建
+    except OSError as e:
+        return f"无法创建工作区目录 {p}：{e}"
     if p not in _WORKSPACE_ALLOWLIST:
         _WORKSPACE_ALLOWLIST.append(p)
     return "已添加工作区：" + str(p) + "。当前白名单：" + "；".join(str(r) for r in workspace_allowed_roots())

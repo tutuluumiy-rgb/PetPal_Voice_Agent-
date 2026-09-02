@@ -36,12 +36,39 @@ WORKER_ROLE = (
     "- 文件操作用 write（写入）/ edit（修改）/ read（读取），**禁止使用 bash**（后台不可执行命令，"
     "bash 不在你的工具列表里）。\n"
     "- 联网查信息用 web_search，查天气用 get_weather，算数用 calculator。\n"
-    "- 只输出最终结果文本（供语音播报），不要输出过程日志。"
+    "- 只输出最终结果文本（供语音播报），不要输出过程日志。\n"
+    "## 收敛原则（重要）\n"
+    "- **够用即停**：搜索/查资料最多推进 2~3 轮，信息足够就立即汇总输出，不要反复深挖、"
+    "不要追求完美。你的目标是按时完成任务，不是穷尽一切资料。\n"
+    "- 每轮优先合并同类查询（web_search 一次可并行 2 个），避免一轮轮无限搜索。"
 )
 
-# ── Worker 可用工具集：工作模式全量，但剔除 bash（后台不执行命令）──
+# ── Worker 收敛参数：sub_turn 上限（work 默认 30 次过松，后台任务容易长时间不收敛）──
+WORKER_MAX_SUB_TURNS = int(os.getenv("WORKER_MAX_SUB_TURNS", "8"))
+
+# ── Worker 可用工具集：工作模式全量，但剔除不适合后台执行的工具 ──
+# 剔除：bash（后台不执行命令）、delegate_task/get_task_status/set_workspace（主 Agent 控制类）
 from tools.loader import build_tools_list as _build_tools_list
-WORKER_TOOLS = [t for t in _build_tools_list("work") if t["function"]["name"] != "bash"]
+_WORKER_EXCLUDE_TOOLS = {"bash", "delegate_task", "get_task_status", "set_workspace"}
+WORKER_TOOLS = [
+    t for t in _build_tools_list("work") if t["function"]["name"] not in _WORKER_EXCLUDE_TOOLS
+]
+
+# ── 最近未播报的任务完成通知（断连场景：前端回待机 ws 断开播不了，
+#    等下次连接（唤醒）补播）──
+_pending_announce: dict | None = None  # {"kind": "succeeded"|"failed", "text": str, "at": float}
+
+
+def consume_pending_announce(max_age_s: float = 300.0) -> dict | None:
+    """取走最近未播报的任务通知（一次性；超过 max_age_s 丢弃）。"""
+    global _pending_announce
+    p = _pending_announce
+    if not p:
+        return None
+    _pending_announce = None
+    if time.time() - p["at"] > max_age_s:
+        return None
+    return p
 
 
 async def _send_ctx(ws, text: str):
@@ -257,12 +284,17 @@ class SessionWorker:
         # messages，而是从 session.transcript() 重建上下文（build_model_context）。
         # 之前把 user 任务只放在局部变量里 → Worker 看不到目标 → 回"未收到任务内容"。
         self.store.add("user", user, run_id=f"task-{taskId}", sub_turn=1)
+        # Worker 收敛：sub_turn 上限收紧（防止反复搜索长时间不返回）
+        from dataclasses import replace
+        from agent_config import get_mode_config
+        from agent_runtime import run_agent_loop
+        worker_cfg = replace(get_mode_config("work"), max_sub_turns=WORKER_MAX_SUB_TURNS)
         parts: list[str] = []
         sub_turn_seen = 0
         async for ev in run_agent_loop(
             client, model, "work", system_prompt, self.store,
             run_id=f"task-{taskId}", timeout=timeout, on_tool=_worker_on_tool,
-            tools_override=WORKER_TOOLS,
+            tools_override=WORKER_TOOLS, config=worker_cfg,
         ):
             kind = ev[0]
             if kind == "sub_turn":
@@ -375,6 +407,18 @@ class TaskService:
             if worker.current_task_id == taskId:
                 worker.current_task_id = None
 
+    def active_task_hint(self, session_id: str) -> str:
+        """主 Agent 生成前注入：当前会话是否有进行中的后台任务。
+
+        提示模型：用户询问任务进度时必须先 get_task_status 查真实状态，防凭记忆说谎。
+        """
+        worker = self._workers.get(session_id)
+        if worker is not None and worker.current_task_id:
+            return (f"\n[后台任务提醒] 当前有后台任务 {worker.current_task_id} 正在进行。"
+                    "用户询问其进度/状态/结果时，必须先调用 get_task_status 查询真实状态再回答，"
+                    "不要凭记忆推测或编造。")
+        return ""
+
     def get_status(self, taskId: str) -> str:
         import sys as _sys
         print(f"[任务] get_task_status task={taskId}", file=_sys.stderr, flush=True)
@@ -415,13 +459,18 @@ class TaskService:
 
 
 async def _announce(ws, session, status: str, text: str):
-    """任务完成/失败语音通知：不抢播——当前正在播报/生成时不打扰，短暂等待后重试。"""
+    """任务完成/失败语音通知：不抢播（listening 才播）。
+
+    播报失败（连接断开/重试超时放弃）→ 记录 pending，下次连接（唤醒）补播。
+    """
+    global _pending_announce
     try:
         import main as _main
-        # ws 传入时携带创建时刻的引用；若连接已断开，_announce_task_done 内部 send 抛错即吞
-        await _main._announce_task_done(ws, session, status, text)
+        ok = await _main._announce_task_done(ws, session, status, text)
+        if not ok:
+            _pending_announce = {"kind": status, "text": text, "at": time.time()}
     except Exception:
-        pass
+        _pending_announce = {"kind": status, "text": text, "at": time.time()}
 
 
 # ── 主 Agent 工具 executor（tools/loader 注册）──

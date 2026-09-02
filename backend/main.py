@@ -640,6 +640,15 @@ async def audio_ws(ws: WebSocket):
     session = ConversationSession()
     session.mode = mode_state.get_mode()  # F4：会话级模式快照（后续语音切换只改本会话）
     await ws.send_json({"type": "ready", "session_id": session.session_id})
+    # 断线期间有未播报的后台任务完成 → 唤醒重连即补播
+    try:
+        from task_service import consume_pending_announce
+        _p = consume_pending_announce()
+        if _p:
+            print(f"[任务][通知] 补播未播报的任务完成（kind={_p['kind']}）", flush=True)
+            await _announce_task_done(ws, session, _p["kind"], _p["text"])
+    except Exception:
+        pass
     # 契约：连接建立发布初始状态通知（listening）
     await _sync_backend_state(ws, session, "connected")
 
@@ -1681,6 +1690,14 @@ async def handle_user_speech(ws: WebSocket, session: ConversationSession, text: 
     run_id = _uuid.uuid4().hex[:8]
     mode = mode_state.get_mode()
     system_prompt = build_system_prompt(mode)
+    # 主 Agent 任务感知：当前会话有后台任务进行时注入提醒（问进度必须先查工具，防凭记忆说谎）
+    try:
+        from task_service import _svc as _task_svc
+        _hint = _task_svc().active_task_hint(session.session_id)
+        if _hint:
+            system_prompt += _hint
+    except Exception:
+        pass
     # 按会话模式选 LLM：工作模式默认 DeepSeek（工具调用更稳）；闲聊跟随 LLM_PROVIDER
     _llm = get_llm_for_mode(mode)
     if extra_context:
@@ -2217,15 +2234,17 @@ _ANNOUNCE_RETRY_WAIT_S = 2.0
 
 
 async def _announce_task_done(ws, session, status: str, text: str):
-    """任务完成/失败语音通知：不抢播——当前正在播报/生成/收话时不打扰，
-    等当前 turn 安全回到 listening 再播；连接断开或超时则静默放弃。"""
+    """任务完成/失败语音通知：不抢播——等当前 turn 安全回到 listening 再播。
+
+    返回 True=已成功播报；False=断线/超时放弃播报（调用方记 pending 下次补播）。
+    """
     import sys as _sys
     if status == "succeeded":
         message = text  # 后台已把结果压缩成一句，直接播（无前缀）
     elif status == "failed":
         message = f"后台任务没成功：{text}"
     else:
-        return  # cancelled：静默
+        return False  # cancelled：静默
     print(f"[任务][通知] 等待安全播报时机（status={status}）…", file=_sys.stderr, flush=True)
     for _ in range(_ANNOUNCE_RETRY_TIMES):
         try:
@@ -2240,11 +2259,12 @@ async def _announce_task_done(ws, session, status: str, text: str):
                 except Exception:
                     pass
                 await tts.speak_and_send(ws, message, session.session_id, {"emotion": "平静"})
-                return
+                return True
         except Exception:
-            return  # WebSocket 已断开等：放弃播报
+            return False  # WebSocket 已断开等：放弃播报，交回调用方补播
         await asyncio.sleep(_ANNOUNCE_RETRY_WAIT_S)
     print(f"[任务][通知] 等待超时，放弃播报（不影响任务结果）", file=_sys.stderr, flush=True)
+    return False
 
 
 async def cleanup_session(session: ConversationSession):
