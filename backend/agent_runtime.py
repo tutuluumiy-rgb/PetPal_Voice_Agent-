@@ -44,12 +44,12 @@ from providers.llm import SENTENCE_ENDS, _EMOTION_RE, strip_emotion_tags
 MAX_PARALLEL_TOOL_CALLS = 2
 
 # ── 按模式默认温度（温度越高答复越发散）──
-# work：任务执行/工具调用要稳定准确 → 低温度（默认 0.3）
-# chat：闲聊发散一点更口语自然 → 默认 0.9
+# work：任务执行/工具调用要稳定准确 → 低温度（默认 0.5）
+# chat：口语自然，适度发散 → 默认 0.7
 # 评测中心等显式传入 temperature 时优先生效（session.temperature 覆盖）
 import os as _os
-CHAT_MODE_TEMPERATURE = float(_os.getenv("CHAT_MODE_TEMPERATURE", "0.9"))
-WORK_MODE_TEMPERATURE = float(_os.getenv("WORK_MODE_TEMPERATURE", "0.3"))
+CHAT_MODE_TEMPERATURE = float(_os.getenv("CHAT_MODE_TEMPERATURE", "0.7"))
+WORK_MODE_TEMPERATURE = float(_os.getenv("WORK_MODE_TEMPERATURE", "0.5"))
 
 _LIMIT_HINT = (
     "（系统提示：你已经达到本次允许的最大模型调用轮次，必须停止调用任何工具，"
