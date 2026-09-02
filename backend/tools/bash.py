@@ -27,7 +27,36 @@ from tools._file_utils import (
 )
 
 
-BASH_EXECUTABLE = shutil.which("bash.exe") or shutil.which("bash")
+def _resolve_bash_executable():
+    """解析真正可用的 bash：
+    1) 优先 Git Bash（Windows 下最可靠，探测常见安装路径）；
+    2) 其次 PATH 中的 bash.exe/bash（可能是 WSL 存根——用 --version 实测可用性，
+       无发行版的 WSL 存根会失败，跳过，避免命令全部报 `<3>WSL…` 乱码）；
+    3) 都没有 → None（工具报"未找到可用 bash"）。
+    """
+    candidates: list[str] = []
+    for p in (
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files\Git\usr\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\bin\bash.exe",
+    ):
+        if os.path.exists(p):
+            candidates.append(p)
+    for name in ("bash.exe", "bash"):
+        p = shutil.which(name)
+        if p:
+            candidates.append(p)
+    for cand in candidates:
+        try:
+            r = subprocess.run([cand, "--version"], capture_output=True, timeout=5)
+            if r.returncode == 0:
+                return cand
+        except Exception:
+            continue
+    return None
+
+
+BASH_EXECUTABLE = _resolve_bash_executable()
 BASH_TIMEOUT_SECONDS = 20
 BASH_MAX_TIMEOUT_SECONDS = 120
 BASH_MAX_COMMAND_CHARS = 4000
@@ -92,7 +121,10 @@ def bash(command: str, timeout: int | float | None = None) -> ToolOutput:
         if timeout > BASH_MAX_TIMEOUT_SECONDS:
             raise ValueError(f"timeout 不能超过 {BASH_MAX_TIMEOUT_SECONDS} 秒")
     if not BASH_EXECUTABLE:
-        raise RuntimeError("未找到 bash；请安装 Git Bash 或启用 WSL")
+        raise RuntimeError(
+            "未找到可用的 bash（Windows 下请安装 Git Bash；若用 WSL 请先安装/启用一个发行版）。"
+            "如需继续可改用 read/write/edit 完成文件操作。"
+        )
 
     timeout_seconds = timeout or BASH_TIMEOUT_SECONDS
     TOOL_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
